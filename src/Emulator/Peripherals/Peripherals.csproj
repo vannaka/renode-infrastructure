@@ -126,6 +126,7 @@
     <Compile Include="Peripherals\UART\STM32W_UART.cs" />
     <Compile Include="Peripherals\UART\EFM32_UART.cs" />
     <Compile Include="Peripherals\SD\SDHCI.cs" />
+    <Compile Include="Peripherals\SD\ZynqSDController.cs" />
     <Compile Include="Peripherals\USBDeprecated\PortStatusAndControlRegister.cs" />
     <Compile Include="Peripherals\USBDeprecated\USBDescriptor.cs" />
     <Compile Include="Peripherals\USBDeprecated\DescriptorType.cs" />
