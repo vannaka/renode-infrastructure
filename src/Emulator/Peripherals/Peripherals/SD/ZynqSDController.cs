@@ -16,6 +16,7 @@ using System.IO;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
 using Antmicro.Renode.Core.Structure.Registers;
+using static Antmicro.Renode.Utilities.BitHelper;
 
 namespace Antmicro.Renode.Peripherals.SD
 {
@@ -273,6 +274,8 @@ namespace Antmicro.Renode.Peripherals.SD
                     internalBuffer.EnqueueRange(sdCard.ReadExtendedCardSpecificDataRegister());
                     break;
                 case SDCardCommand.ReadSingleBlock:
+                case SDCardCommand.SendOperatingConditionRegister_ACMD41:
+                case SDCardCommand.SendSDConfigurationRegister_ACMD51:
                     ReadCard(sdCard, (uint)blockSizeField.Value);
                     break;
                 case SDCardCommand.ReadMultipleBlocks:
@@ -287,13 +290,94 @@ namespace Antmicro.Renode.Peripherals.SD
             }
         }
 
+
+        private enum ADMAAction
+        {
+            NOP = 0b000,
+            RSV = 0b010,
+            Transfer = 0b100,
+            Link = 0b110
+        }
+
+        private void DoAdma(SDCard sdCard, bool isSDRead)
+        {
+            ulong dmaDescriptor;
+            bool valid, isEnd, doInt;
+            ADMAAction action;
+            uint sysAddr;
+            ushort length;
+            
+            while(true)
+            {
+                dmaDescriptor = sysbus.ReadQuadWord(admaSystemAddress.Value);
+                valid = IsBitSet(dmaDescriptor, 1);
+                isEnd = IsBitSet(dmaDescriptor, 2);
+                doInt = IsBitSet(dmaDescriptor, 3);
+                action = (ADMAAction)GetValue(dmaDescriptor, 3, 3);
+                sysAddr = (uint)GetValue(dmaDescriptor, 32, 32);
+                length = (ushort)GetValue(dmaDescriptor, 16, 16);
+                if(0 == length) length = ushort.MaxValue;
+
+                if(!valid)
+                {
+                    this.Log(LogLevel.Warning, "Invalid ADMA descriptor: 0x{X:8}: 0x{X:8}", admaSystemAddress.Value, dmaDescriptor);
+                    irqManager.SetInterrupt(Interrupts.ADMAError, irqManager.IsEnabled(Interrupts.ADMAError));
+                    // When this interrupt fires, the DMA engine is supposed to pause the transfer in it's current state such that
+                    // the host device can fix up the error and resume the transfer. The current design does not allow for this.
+                    // Workaround: Don't write shit software. (There might be a valid reason to craft a bad descriptor, idk)
+                    return;
+                }
+
+                admaSystemAddress.Value += 64;
+
+                switch (action)
+                {   
+                    case ADMAAction.NOP:
+                    case ADMAAction.RSV:
+                        // Nothing to do
+                        break;
+
+                    case ADMAAction.Link:
+                        // Link to another descriptor table.
+                        admaSystemAddress.Value = sysAddr;
+                        break;
+
+                    case ADMAAction.Transfer:
+                        if(isSDRead)
+                        {
+                            var data = sdCard.ReadData(length);
+                            sysbus.WriteBytes(data, sysAddr);
+                        }
+                        else
+                        {
+                            var data = sysbus.ReadBytes(sysAddr, length);
+                            sdCard.WriteData(data);
+                        }
+                        break;
+
+                    default:
+                        this.Log(LogLevel.Warning, "Bad ADMA descriptor action: {}", action);
+                        irqManager.SetInterrupt(Interrupts.ADMAError, irqManager.IsEnabled(Interrupts.ADMAError));
+                        return;
+                }
+                
+                if(isEnd)
+                {
+                    break;
+                }
+                else if(doInt)
+                {
+                    // NOTE this will do int for NOP action. I can't tell what the intended behavior is.
+                    irqManager.SetInterrupt(Interrupts.DMAInterrupt, irqManager.IsEnabled(Interrupts.DMAInterrupt));
+                }
+            }
+        }
+
         private void ReadCard(SDCard sdCard, uint size)
         {
-            var data = sdCard.ReadData(size);
-            this.Log(LogLevel.Info, "ReadCard w/ DMA: {}", isDmaEnabled);
             if(isDmaEnabled.Value)
             {
-                sysbus.WriteBytes(data, (ulong)admaSystemAddress.Value);
+                DoAdma(sdCard, true);
                 Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
                 {
                     irqManager.SetInterrupt(Interrupts.TransferComplete, irqManager.IsEnabled(Interrupts.TransferComplete));
@@ -301,27 +385,29 @@ namespace Antmicro.Renode.Peripherals.SD
             }
             else
             {
-                internalBuffer.EnqueueRange(data);
+                internalBuffer.EnqueueRange(sdCard.ReadData(size));
             }
         }
 
         private void WriteCard(SDCard sdCard, uint size)
         {
-            var bytes = new byte[size];
             if(isDmaEnabled.Value)
             {
-                bytes = sysbus.ReadBytes((ulong)admaSystemAddress.Value, (int)size);
+                DoAdma(sdCard, false);
             }
             else
             {
+                var bytes = new byte[size];
+
                 if(internalBuffer.Count < size)
                 {
                     this.Log(LogLevel.Warning, "Could not write {0} bytes to SD card, writing {1} bytes instead.", size, internalBuffer.Count);
                     size = (uint)internalBuffer.Count;
                 }
                 bytes = internalBuffer.DequeueRange((int)size);
+                sdCard.WriteData(bytes);
             }
-            sdCard.WriteData(bytes);
+
             Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
             {
                 irqManager.SetInterrupt(Interrupts.TransferComplete, irqManager.IsEnabled(Interrupts.TransferComplete));
@@ -376,6 +462,8 @@ namespace Antmicro.Renode.Peripherals.SD
 
         private readonly IBusController sysbus;
         private readonly InterruptManager<Interrupts> irqManager;
+
+        // private UInt64 dmaDescriptor;
         
         // The zynq has an SD controller that is compliant with the
         //  SD Host Controller Specification v2.0.
@@ -475,6 +563,10 @@ namespace Antmicro.Renode.Peripherals.SD
             ReadMultipleBlocks = 18,
             WriteSingleBlock = 24,
             WriteMultipleBlocks = 25,
+
+            // These application commands behave like CMD17 - ReadSingleBlock.
+            SendOperatingConditionRegister_ACMD41 = 41,
+            SendSDConfigurationRegister_ACMD51 = 51,
         }
     }
 }
