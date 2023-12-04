@@ -480,9 +480,13 @@ namespace Antmicro.Renode.Peripherals.SD
                 }
 
                 case SdCardCommand.SendInterfaceConditionCommand_CMD8:
-                    return spiMode
+                    return 
+                        spiMode
                         ? GenerateR7Response()
-                        : CardStatus;
+                        : // CMD8 simply echos back the argument.
+                          BitConcatenator.New(32)
+                            .StackAbove(arg, 32, 0)
+                            .Bits;
 
                 case SdCardCommand.SendCardSpecificData_CMD9:
                     return spiMode

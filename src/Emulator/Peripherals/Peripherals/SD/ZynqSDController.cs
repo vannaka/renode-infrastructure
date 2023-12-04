@@ -19,6 +19,7 @@ using Antmicro.Renode.Core.Structure.Registers;
 
 namespace Antmicro.Renode.Peripherals.SD
 {
+    [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
     public sealed class ZynqSDController : NullRegistrationPointPeripheralContainer<SDCard>, IDoubleWordPeripheral, IProvidesRegisterCollection<DoubleWordRegisterCollection>, IKnownSize, IDisposable
     {        
         public ZynqSDController(IMachine machine) : base(machine)
@@ -210,6 +211,10 @@ namespace Antmicro.Renode.Peripherals.SD
                 .WithFlag(18, FieldMode.Read, name: "Card Detect Pin Level (CDSL)", valueProviderCallback: _ => RegisteredPeripheral != null)
             ;
 
+            Registers.HostControl1.Define(this)
+                .WithFlag(8, name: "SD Bus Power")
+            ;
+
             Registers.HostControl2.Define(this)
                 .WithFlag(1, FieldMode.Read, name: "Internal Clock Stable (ICS)", valueProviderCallback: _ => true)
                 .WithTag("Software Reset For CMD Line (SRCMD)", 25, 1)
@@ -247,6 +252,13 @@ namespace Antmicro.Renode.Peripherals.SD
 
             Registers.ADMASystemAddress.Define(this)
                 .WithValueField(0, 32, out admaSystemAddress, name: "ADMA System Address")
+                // TODO: This is really a pointer to an arrary of DMA descriptors of the format:
+                // typedef __packed_struct
+                //      {
+                //      uint16              attr;               /* ADMA flags                       */
+                //      uint16              length;             /* length of transfer in bytes      */
+                //      uint32            * addr;               /* source/destination address       */
+                //      } hwm_sd_adma_descr_t;
             ;
         }
 
@@ -278,6 +290,7 @@ namespace Antmicro.Renode.Peripherals.SD
         private void ReadCard(SDCard sdCard, uint size)
         {
             var data = sdCard.ReadData(size);
+            this.Log(LogLevel.Info, "ReadCard w/ DMA: {}", isDmaEnabled);
             if(isDmaEnabled.Value)
             {
                 sysbus.WriteBytes(data, (ulong)admaSystemAddress.Value);
@@ -385,7 +398,7 @@ namespace Antmicro.Renode.Peripherals.SD
 
             // [0x24-0x2F] - Host Control 1 and Others
             PresentState = 0x24,
-            // HostControl1 = 0x28,
+            HostControl1 = 0x28, // Driver enables DMA with DMA_SEL reg here.
             HostControl2 = 0x2C,
 
             // [0x30-0x3D] - Interrupt Controls
