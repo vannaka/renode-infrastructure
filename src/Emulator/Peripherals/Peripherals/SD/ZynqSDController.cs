@@ -74,6 +74,7 @@ namespace Antmicro.Renode.Peripherals.SD
 
             Registers.CommandTransferMode.Define(this)
                 .WithFlag(0, out isDmaEnabled, name: "DMA Enable")
+                .WithFlag(1, out isblockCountEnabled, name: "Block Count Enable")
                 .WithTag("Block Count Enable (BCE)", 1, 1)
                 .WithTag("Auto CMD12 Enable (ACE)", 2, 2)
                 .WithTag("Data Transfer Direction Select (DTDS)", 4, 1)
@@ -253,13 +254,6 @@ namespace Antmicro.Renode.Peripherals.SD
 
             Registers.ADMASystemAddress.Define(this)
                 .WithValueField(0, 32, out admaSystemAddress, name: "ADMA System Address")
-                // TODO: This is really a pointer to an arrary of DMA descriptors of the format:
-                // typedef __packed_struct
-                //      {
-                //      uint16              attr;               /* ADMA flags                       */
-                //      uint16              length;             /* length of transfer in bytes      */
-                //      uint32            * addr;               /* source/destination address       */
-                //      } hwm_sd_adma_descr_t;
             ;
         }
 
@@ -305,7 +299,7 @@ namespace Antmicro.Renode.Peripherals.SD
             bool valid, isEnd, doInt;
             ADMAAction action;
             uint sysAddr;
-            ushort length;
+            ushort length, totalLength = 0;
             
             while(true)
             {
@@ -328,6 +322,7 @@ namespace Antmicro.Renode.Peripherals.SD
                     return;
                 }
 
+                // Inc desc pointer here so that if ADMAError int happens, the Host Driver will read the correct value.
                 admaSystemAddress.Value += 64;
 
                 switch (action)
@@ -353,6 +348,8 @@ namespace Antmicro.Renode.Peripherals.SD
                             var data = sysbus.ReadBytes(sysAddr, length);
                             sdCard.WriteData(data);
                         }
+
+                        totalLength += length;
                         break;
 
                     default:
@@ -363,6 +360,10 @@ namespace Antmicro.Renode.Peripherals.SD
                 
                 if(isEnd)
                 {
+                    if(isblockCountEnabled.Value && (totalLength != (ushort)(blockCountField.Value * blockSizeField.Value)))
+                        this.Log(LogLevel.Warning, "Sum of ADMA descriptor lengths not equal to Block Count * Block Size! {} != {}", totalLength, blockCountField.Value * blockSizeField.Value);
+                    
+                    // NOTE: It is optional to assert the DMAInterrupt on the last descriptor before asserting the TransferComplete interrupt.
                     break;
                 }
                 else if(doInt)
@@ -450,6 +451,7 @@ namespace Antmicro.Renode.Peripherals.SD
 
         // Register field variables
         private IFlagRegisterField isDmaEnabled;
+        private IFlagRegisterField isblockCountEnabled;
         private IValueRegisterField blockSizeField;
         private IValueRegisterField blockCountField;
         private IValueRegisterField commandArgumentField;
