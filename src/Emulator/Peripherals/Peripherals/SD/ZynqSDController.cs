@@ -75,7 +75,6 @@ namespace Antmicro.Renode.Peripherals.SD
             Registers.CommandTransferMode.Define(this)
                 .WithFlag(0, out isDmaEnabled, name: "DMA Enable")
                 .WithFlag(1, out isblockCountEnabled, name: "Block Count Enable")
-                .WithTag("Block Count Enable (BCE)", 1, 1)
                 .WithTag("Auto CMD12 Enable (ACE)", 2, 2)
                 .WithTag("Data Transfer Direction Select (DTDS)", 4, 1)
                 .WithEnumField(16, 2, out responseTypeSelectField, name: "Response Type Select (RTS)")
@@ -143,9 +142,9 @@ namespace Antmicro.Renode.Peripherals.SD
 
                     ProcessCommand(sdCard, commandIndex.Value);
 
-                    irqManager.SetInterrupt(Interrupts.BufferWriteReady, irqManager.IsEnabled(Interrupts.BufferWriteReady));
-                    irqManager.SetInterrupt(Interrupts.BufferReadReady, irqManager.IsEnabled(Interrupts.BufferReadReady));
-                    irqManager.SetInterrupt(Interrupts.CommandComplete, irqManager.IsEnabled(Interrupts.CommandComplete));
+                    irqManager.SetInterrupt(Interrupts.BufferWriteReady);
+                    irqManager.SetInterrupt(Interrupts.BufferReadReady);
+                    irqManager.SetInterrupt(Interrupts.CommandComplete);
                 })
             ;
 
@@ -224,11 +223,18 @@ namespace Antmicro.Renode.Peripherals.SD
             ;
 
             Registers.ErrorNormalInterruptStatus.Bind(this, irqManager.GetRegister<DoubleWordRegister>(
-                valueProviderCallback: (irq, _) => irqManager.IsSet(irq),
+                valueProviderCallback: (irq, _) => irqManager.IsSet(irq) && IsBitSet((uint)intStatusEnable.Value, (byte)irq),
                 writeCallback: (irq, prev, curr) => { if(curr) irqManager.ClearInterrupt(irq); } ))
             ;
 
-            Registers.ErrorNormalStatusEnable.Bind(this, irqManager.GetRegister<DoubleWordRegister>(
+            // Enables corresponding status bit in ErrorNormalInterruptStatus register regardless of 
+            //  ErrorNormalSignalEnable bit.
+            Registers.ErrorNormalStatusEnable.Define(this)
+                .WithValueField(0, 32, out intStatusEnable, name: "SD Interrupts status enable register"  )
+            ;
+
+            // If set, the interrupt will signal the external interrupt controller.
+            Registers.ErrorNormalSignalEnable.Bind(this, irqManager.GetRegister<DoubleWordRegister>(
                 valueProviderCallback: (irq, _) => irqManager.IsEnabled(irq),
                 writeCallback: (irq, _, curr) =>
                 {
@@ -315,7 +321,7 @@ namespace Antmicro.Renode.Peripherals.SD
                 if(!valid)
                 {
                     this.Log(LogLevel.Warning, "Invalid ADMA descriptor: 0x{X:8}: 0x{X:8}", admaSystemAddress.Value, dmaDescriptor);
-                    irqManager.SetInterrupt(Interrupts.ADMAError, irqManager.IsEnabled(Interrupts.ADMAError));
+                    irqManager.SetInterrupt(Interrupts.ADMAError);
                     // When this interrupt fires, the DMA engine is supposed to pause the transfer in it's current state such that
                     // the host device can fix up the error and resume the transfer. The current design does not allow for this.
                     // Workaround: Don't write shit software. (There might be a valid reason to craft a bad descriptor, idk)
@@ -353,15 +359,15 @@ namespace Antmicro.Renode.Peripherals.SD
                         break;
 
                     default:
-                        this.Log(LogLevel.Warning, "Bad ADMA descriptor action: {}", action);
-                        irqManager.SetInterrupt(Interrupts.ADMAError, irqManager.IsEnabled(Interrupts.ADMAError));
+                        this.Log(LogLevel.Warning, "Bad ADMA descriptor action: {0}", action);
+                        irqManager.SetInterrupt(Interrupts.ADMAError);
                         return;
                 }
                 
                 if(isEnd)
                 {
                     if(isblockCountEnabled.Value && (totalLength != (ushort)(blockCountField.Value * blockSizeField.Value)))
-                        this.Log(LogLevel.Warning, "Sum of ADMA descriptor lengths not equal to Block Count * Block Size! {} != {}", totalLength, blockCountField.Value * blockSizeField.Value);
+                        this.Log(LogLevel.Warning, "Sum of ADMA descriptor lengths not equal to Block Count * Block Size! {0} != {1}", totalLength, blockCountField.Value * blockSizeField.Value);
                     
                     // NOTE: It is optional to assert the DMAInterrupt on the last descriptor before asserting the TransferComplete interrupt.
                     break;
@@ -369,7 +375,7 @@ namespace Antmicro.Renode.Peripherals.SD
                 else if(doInt)
                 {
                     // NOTE this will do int for NOP action. I can't tell what the intended behavior is.
-                    irqManager.SetInterrupt(Interrupts.DMAInterrupt, irqManager.IsEnabled(Interrupts.DMAInterrupt));
+                    irqManager.SetInterrupt(Interrupts.DMAInterrupt);
                 }
             }
         }
@@ -381,7 +387,8 @@ namespace Antmicro.Renode.Peripherals.SD
                 DoAdma(sdCard, true);
                 Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
                 {
-                    irqManager.SetInterrupt(Interrupts.TransferComplete, irqManager.IsEnabled(Interrupts.TransferComplete));
+                    this.InfoLog("SD INT Transfer Complete (read)");
+                    irqManager.SetInterrupt(Interrupts.TransferComplete);
                 });
             }
             else
@@ -411,7 +418,8 @@ namespace Antmicro.Renode.Peripherals.SD
 
             Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
             {
-                irqManager.SetInterrupt(Interrupts.TransferComplete, irqManager.IsEnabled(Interrupts.TransferComplete));
+                this.InfoLog("SD INT Transfer Complete (write)");
+                irqManager.SetInterrupt(Interrupts.TransferComplete);
             });
         }
 
@@ -419,10 +427,10 @@ namespace Antmicro.Renode.Peripherals.SD
         {
             var internalBytes = internalBuffer.DequeueRange(4);
             bytesRead += (uint)internalBytes.Length;
-            irqManager.SetInterrupt(Interrupts.BufferReadReady, irqManager.IsEnabled(Interrupts.BufferReadReady));
+            irqManager.SetInterrupt(Interrupts.BufferReadReady);
             if(bytesRead == (blockCountField.Value * blockSizeField.Value)|| !internalBuffer.Any())
             {
-                irqManager.SetInterrupt(Interrupts.TransferComplete, irqManager.IsEnabled(Interrupts.TransferComplete));
+                irqManager.SetInterrupt(Interrupts.TransferComplete);
                 bytesRead = 0;
                 // If we have read the exact amount of data we wanted, we can clear the buffer from any leftovers.
                 internalBuffer.Clear();
@@ -439,7 +447,7 @@ namespace Antmicro.Renode.Peripherals.SD
                 return;
             }
             sdCard.WriteData(internalBuffer.DequeueAll());
-            irqManager.SetInterrupt(Interrupts.TransferComplete, irqManager.IsEnabled(Interrupts.TransferComplete));
+            irqManager.SetInterrupt(Interrupts.TransferComplete);
         }
 
         [IrqProvider]
@@ -456,6 +464,7 @@ namespace Antmicro.Renode.Peripherals.SD
         private IValueRegisterField blockCountField;
         private IValueRegisterField commandArgumentField;
         private IValueRegisterField admaSystemAddress;
+        private IValueRegisterField intStatusEnable;
         private IEnumRegisterField<SDCardCommand> commandIndex;
         private IEnumRegisterField<ResponseType> responseTypeSelectField;
 
@@ -493,8 +502,8 @@ namespace Antmicro.Renode.Peripherals.SD
 
             // [0x30-0x3D] - Interrupt Controls
             ErrorNormalInterruptStatus = 0x30,
-            ErrorNormalStatusEnable = 0x34,
-            // ErrorNormalSignalEnable = 0x38,
+            ErrorNormalStatusEnable = 0x34, // enables irq status bits in ErrorNormalInterruptStatus register.
+            ErrorNormalSignalEnable = 0x38, // enables irq to signal the external interrupt controller.
             // AutoCMD12ErrorStatus = 0x3C,
 
             // [0x40-0x4F] - Capabilities
@@ -527,7 +536,6 @@ namespace Antmicro.Renode.Peripherals.SD
 
         private enum Interrupts
         {
-            // TODO:LMM: Replace these with the zynq ones
             CommandComplete = 0,
             TransferComplete = 1,
             BlockGapEvent = 2,
