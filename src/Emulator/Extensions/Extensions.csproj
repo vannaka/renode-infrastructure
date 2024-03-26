@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
@@ -7,14 +7,14 @@
     <OutputType>Library</OutputType>
     <RootNamespace>Antmicro.Renode.Extensions</RootNamespace>
     <AssemblyName>Extensions</AssemblyName>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.6.2</TargetFrameworkVersion>
     <ProductVersion>8.0.30703</ProductVersion>
     <SchemaVersion>2.0</SchemaVersion>
     <PropertiesLocation>..\..\..\..\..\output\properties.csproj</PropertiesLocation>
   </PropertyGroup>
   <Import Project="$(PropertiesLocation)" />
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <LangVersion>7</LangVersion>
+    <LangVersion>7.2</LangVersion>
     <DebugSymbols>True</DebugSymbols>
     <DebugType>full</DebugType>
     <Optimize>False</Optimize>
@@ -25,7 +25,7 @@
     <ConsolePause>False</ConsolePause>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <LangVersion>7</LangVersion>
+    <LangVersion>7.2</LangVersion>
     <DebugType>none</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release</OutputPath>
@@ -161,6 +161,7 @@
     <Compile Include="Utilities\GDB\Commands\ThreadAliveCommand.cs" />
     <Compile Include="Utilities\GDB\Commands\ThreadAttachedCommand.cs" />
     <Compile Include="Utilities\GDB\Commands\ThreadContextCommand.cs" />
+    <Compile Include="Utilities\GDB\Commands\Trace32Commands.cs" />
     <Compile Include="Utilities\USBIP\USBIPServer.cs" />
     <Compile Include="Utilities\USBIP\InterfaceDescriptor.cs" />
     <Compile Include="Utilities\USBIP\DeviceDescriptor.cs" />
@@ -187,6 +188,7 @@
       <DependentUpon>RegisterCollectionHookExtensions.tt</DependentUpon>
     </Compile>
     <Compile Include="UserInterface\Commands\ResdCommand.cs" />
+    <Compile Include="Hooks\WFIPythonEngine.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Hooks\RegisterCollectionHookExtensions.tt">

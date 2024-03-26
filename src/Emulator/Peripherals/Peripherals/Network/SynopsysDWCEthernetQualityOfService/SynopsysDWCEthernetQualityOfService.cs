@@ -14,6 +14,7 @@ using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Network;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.CPU;
 using Antmicro.Renode.Peripherals.Timers;
 using Antmicro.Renode.Time;
 using Antmicro.Renode.Utilities;
@@ -25,11 +26,12 @@ namespace Antmicro.Renode.Peripherals.Network
 {
     public partial class SynopsysDWCEthernetQualityOfService : NetworkWithPHY, IMACInterface, IKnownSize
     {
-        public SynopsysDWCEthernetQualityOfService(IMachine machine, long systemClockFrequency) : base(machine)
+        public SynopsysDWCEthernetQualityOfService(IMachine machine, long systemClockFrequency, ICPU cpuContext = null) : base(machine)
         {
             IRQ = new GPIO();
             MAC = EmulationManager.Instance.CurrentEmulation.MACRepository.GenerateUniqueMAC();
             Bus = machine.GetSystemBus(this);
+            this.cpuContext = cpuContext;
 
             incomingFrames = new Queue<EthernetFrame>();
             rxIpcPacketCounterInterruptEnable = new IFlagRegisterField[NumberOfIpcCounters];
@@ -209,7 +211,7 @@ namespace Antmicro.Renode.Peripherals.Network
                 }
 
                 var bytesWritten = Math.Min((ulong)bytes.Length - rxOffset, bufferSize);
-                Bus.WriteBytes(bytes, bufferAddress, (int)rxOffset, (long)bytesWritten, true);
+                Bus.WriteBytes(bytes, bufferAddress, (int)rxOffset, (long)bytesWritten, true, cpuContext);
                 this.Log(LogLevel.Noisy, "Receive: Writing frame[0x{0:X}, 0x{1:X}) at 0x{2:X}.", rxOffset, rxOffset + bytesWritten, bufferAddress);
                 rxOffset += bytesWritten;
 
@@ -423,11 +425,11 @@ namespace Antmicro.Renode.Peripherals.Network
                         this.Log(LogLevel.Warning, "Transmission: Building new frame without clearing last frame.");
                     }
 
-                    var buffer = structure.FetchBuffer1OrHeader(Bus);
+                    var buffer = structure.FetchBuffer1OrHeader(Bus, cpuContext);
                     txCurrentBuffer.Value = structure.buffer1OrHeaderAddress;
+                    var tsoEnabled = structure.tcpSegmentationEnable && tcpSegmentationEnable.Value;
                     if(structure.firstDescriptor)
                     {
-                        var tsoEnabled = structure.tcpSegmentationEnable && tcpSegmentationEnable.Value;
                         if(tsoEnabled)
                         {
                             frameAssembler = new FrameAssembler(
@@ -438,8 +440,8 @@ namespace Antmicro.Renode.Peripherals.Network
                                 checksumOffloadEnable.Value,
                                 SendFrame
                             );
-                            buffer = structure.FetchBuffer2OrBuffer1(Bus);
-                            txCurrentBuffer.Value = structure.buffer1OrHeaderAddress;
+                            buffer = structure.FetchBuffer2OrBuffer1(Bus, cpuContext);
+                            txCurrentBuffer.Value = structure.buffer2orBuffer1Address;
                         }
                         else
                         {
@@ -451,6 +453,15 @@ namespace Antmicro.Renode.Peripherals.Network
                                 SendFrame
                             );
                         }
+                    }
+                    if(structure.buffer2Length != 0 && !tsoEnabled)
+                    {
+                        // Though it's not clearly stated in the documentation, the STM driver
+                        // expects buffer2 to be valid even with TSO disabled. In this case,
+                        // concatenate two buffers when assembling frame to be sent.
+                        frameAssembler.PushPayload(buffer);
+                        buffer = structure.FetchBuffer2OrBuffer1(Bus, cpuContext);
+                        txCurrentBuffer.Value = structure.buffer2orBuffer1Address;
                     }
                     frameAssembler.PushPayload(buffer);
                     earlyTxInterrupt.Value = true;
@@ -694,6 +705,7 @@ namespace Antmicro.Renode.Peripherals.Network
         }
 
         private IBusController Bus { get; }
+        private ICPU cpuContext { get; }
 
         private bool DMAInterrupts =>
             txInterrupt.Value ||

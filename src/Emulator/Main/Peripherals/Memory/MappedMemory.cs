@@ -27,11 +27,12 @@ using System.Reflection.Emit;
 using System.Reflection;
 #endif
 using Antmicro.Renode.Exceptions;
+using Endianess = ELFSharp.ELF.Endianess;
 
 namespace Antmicro.Renode.Peripherals.Memory
 {
     [Icon("memory")]
-    public sealed class MappedMemory : IBytePeripheral, IWordPeripheral, IDoubleWordPeripheral, IQuadWordPeripheral, IMapped, IDisposable, IKnownSize, ISpeciallySerializable, IMemory, IMultibyteWritePeripheral, ICanLoadFiles
+    public sealed class MappedMemory : IBytePeripheral, IWordPeripheral, IDoubleWordPeripheral, IQuadWordPeripheral, IMapped, IDisposable, IKnownSize, ISpeciallySerializable, IMemory, IMultibyteWritePeripheral, ICanLoadFiles, IEndiannessAware
     {
 #if PLATFORM_WINDOWS
         static MappedMemory()
@@ -378,6 +379,9 @@ namespace Antmicro.Renode.Peripherals.Memory
             }
         }
 
+        // The endianness of MappedMemory matches the host endianness because it is directly backed by host memory
+        public Endianess Endianness => BitConverter.IsLittleEndian ? Endianess.LittleEndian : Endianess.BigEndian;
+
         public void InitWithRandomData()
         {
             var rand = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
@@ -400,10 +404,15 @@ namespace Antmicro.Renode.Peripherals.Memory
 
         public void ZeroRange(long rangeStart, long rangeLength)
         {
+            SetRange(rangeStart, rangeLength, ResetByte);
+        }
+
+        public void SetRange(long rangeStart, long rangeLength, byte value)
+        {
             var array = new byte[rangeLength];
             for(long i = 0; i < rangeLength; ++i)
             {
-                array[i] = ResetByte;
+                array[i] = value;
             }
             WriteBytes(rangeStart, array);
         }

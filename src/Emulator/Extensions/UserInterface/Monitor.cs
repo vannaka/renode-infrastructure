@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -209,7 +209,7 @@ namespace Antmicro.Renode.UserInterface
             BindStatic("plugins", () => TypeManager.Instance.PluginManager);
             BindStatic("EmulationManager", () => emulationManager);
 
-            var includeCommand = new IncludeFileCommand(this, (x, y) => pythonRunner.TryExecutePythonScript(x, y), x => TryExecuteScript(x), (x, y) => TryCompilePlugin(x, y));
+            var includeCommand = new IncludeFileCommand(this, (x, y) => pythonRunner.TryExecutePythonScript(x, y), x => TryExecuteScript(x), (x, y) => TryCompilePlugin(x, y), (x,y) => TryLoadPlatform(x,y));
             Commands.Add(new HelpCommand(this, () =>
             {
                 var gic = GetInternalCommands;
@@ -583,6 +583,24 @@ namespace Antmicro.Renode.UserInterface
                 writer.WriteError("Errors during compilation or loading:\r\n" + e.Message.Replace(Environment.NewLine, "\r\n"));
                 return false;
             }
+        }
+
+        public bool TryLoadPlatform(string filename, ICommandInteraction writer = null)
+        {
+            if(writer == null)
+            {
+                writer = Interaction;
+            }
+            if(currentMachine == null)
+            {
+                var machine = new Machine();
+                EmulationManager.Instance.CurrentEmulation.AddMachine(machine);
+                currentMachine = machine;
+            }
+            var path = new PathToken(filename);
+            var command = new LiteralToken("LoadPlatformDescription");
+            ExecuteDeviceAction("machine", Machine, new Token[]{ command, path });
+            return true;
         }
 
         private List<string> scannedFilesCache = new List<string>();
@@ -959,22 +977,34 @@ namespace Antmicro.Renode.UserInterface
 
             if(currentCommand.Contains(' '))
             {
-                if(currentCommandSplit.Length <= 2)
+                var cmd = Commands.SingleOrDefault(c => c.Name == currentCommandSplit[0] || c.AlternativeNames.Contains(currentCommandSplit[0])) as ISuggestionProvider;
+                if(cmd != null)
                 {
-                    var cmd = Commands.SingleOrDefault(c => c.Name == currentCommandSplit[0] || c.AlternativeNames.Contains(currentCommandSplit[0])) as ISuggestionProvider;
-                    if(cmd != null)
+                    var sugs = cmd.ProvideSuggestions(currentCommandSplit.Length > 1 ? currentCommandSplit[1] : string.Empty);
+                    suggestions.AddRange(sugs.Select(s => string.Format("{0}{1}", allButLastOptional, s)));
+                }
+                else if(currentCommandSplit.Length > 1 && GetAllAvailableNames().Contains(currentCommandSplit[0]))
+                {
+                    var currentObject = GetDevice(currentCommandSplit[0]);
+                    //Take whole command split without first and last element
+                    var commandsChain = currentCommandSplit.Skip(1).Take(currentCommandSplit.Length - 2);
+                    foreach(var command in commandsChain)
                     {
-                        var sugs = cmd.ProvideSuggestions(currentCommandSplit.Length > 1 ? currentCommandSplit[1] : string.Empty);
-                        suggestions.AddRange(sugs.Select(s => string.Format("{0}{1}", allButLastOptional, s)));
-                    }
-                    else if(currentCommandSplit.Length == 2 && GetAllAvailableNames().Contains(currentCommandSplit[0]))
-                    {
-                        var devInfo = GetDeviceSuggestions(currentCommandSplit[0]).Distinct();
-                        if(devInfo != null)
+                        //It is assumed that commands chain can contain only properties or fields
+                        var newObject = FindFieldOrProperty(currentObject, command);
+                        if(newObject == null)
                         {
-                            suggestions.AddRange(devInfo.Where(x => x.StartsWith(currentCommandSplit[1], StringComparison.OrdinalIgnoreCase))
-                                .Select(x => allButLastOptional + x));
+                            currentObject = null;
+                            break;
                         }
+                        currentObject = newObject;
+                    }
+                    
+                    if(currentObject != null)
+                    {
+                        var devInfo = GetObjectSuggestions(currentObject).Distinct(); 
+                        suggestions.AddRange(devInfo.Where(x => x.StartsWith(currentCommandSplit[currentCommandSplit.Length - 1], StringComparison.OrdinalIgnoreCase))
+                            .Select(x => allButLastOptional + x));
                     }
                 }
             }
@@ -990,7 +1020,8 @@ namespace Antmicro.Renode.UserInterface
 
                 if(suggestions.Count == 0) //EmulationManager
                 {
-                    var devInfo = GetDeviceSuggestions(typeof(EmulationManager).Name).Distinct();
+                    var dev = GetDevice(typeof(EmulationManager).Name);
+                    var devInfo = GetObjectSuggestions(dev).Distinct();
                     if(devInfo != null)
                     {
                         suggestions.AddRange(devInfo.Where(x => x.StartsWith(currentCommandSplit[0], StringComparison.OrdinalIgnoreCase)));

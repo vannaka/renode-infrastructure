@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -29,6 +29,18 @@ namespace Antmicro.Renode.Peripherals.Network
                 return Error;
             }
             return base.CeregWrite(type);
+        }
+
+        // CREG - Network Registration
+        [AtCommand("AT+CREG", CommandType.Write)]
+        protected override Response CregWrite(NetworkRegistrationUrcType type)
+        {
+            if(type > NetworkRegistrationUrcType.StatLocation)
+            {
+                this.Log(LogLevel.Warning, "AT+CREG: Argument <n> set to {0}, not supported by this modem", (int)type);
+                return Error;
+            }
+            return base.CregWrite(type);
         }
 
         // CESQ - Extended Signal Quality
@@ -72,19 +84,33 @@ namespace Antmicro.Renode.Peripherals.Network
         // Not supported
         protected override Response Qccid() => Error;
 
+        // CCLK - Set and Get Current Date and Time
+        [AtCommand("AT+CCLK", CommandType.Read)]
+        protected virtual Response CclkRead()
+        {
+            return Ok.WithParameters("+CCLK: " + machine.RealTimeClockDateTime.ToString("yy/MM/dd,HH:mm:sszz").SurroundWith("\""));
+        }
+
         // QCFG - System Configuration
         [AtCommand("AT+QCFG", CommandType.Write)]
-        protected override Response Qcfg(string function, int value)
+        protected override Response Qcfg(string function, params int[] args)
         {
             switch(function)
             {
+                case "ledmode": // NETLIGHT output Mode
+                {
+                    if(args.Length == 1)
+                    {
+                        return SetNetLightMode(args[0]);
+                    }
+                    return base.Qcfg(function, args);
+                }
                 case "apready": // AP_READY Pin
                 case "band": // band configuration
                 case "celevel": // get LTE Cat NB1 coverage enhancement level
                 case "cmux/urcport": // URC output port for CMUX
                 case "ims": // IMS function control
                 case "iotopmode": // network category to be searched under LTE RAT
-                case "ledmode": // NETLIGHT output Mode
                 case "msc": // MSC release version configuration
                 case "nb1/bandprior": // band scan priority under LTE Cat NB1
                 case "nwscanmode": // RAT(s) to be searched
@@ -100,10 +126,10 @@ namespace Antmicro.Renode.Peripherals.Network
                 case "urc/ri/other": // RI behavior when other URCs are presented
                 case "urc/ri/ring": // RI behavior when RING URC is presented
                 case "urc/ri/smsincoming": // RI behavior when incoming SMS URCs are presented
-                    this.Log(LogLevel.Warning, "Config value '{0}' set to {1}, not implemented", function, value);
+                    this.Log(LogLevel.Warning, "Config value '{0}' set to {1}, not implemented", function, string.Join(", ", args));
                     break;
                 default:
-                    return base.Qcfg(function, value);
+                    return base.Qcfg(function, args);
             }
             return Ok;
         }
@@ -139,8 +165,6 @@ namespace Antmicro.Renode.Peripherals.Network
                     {
                         return Error;
                     }
-                    // sendDataFormat only applies to sending in non-data mode, which is not
-                    // currently implemented
                     sendDataFormat = args[0] != 0 ? DataFormat.Hex : DataFormat.Text;
                     receiveDataFormat = args[1] != 0 ? DataFormat.Hex : DataFormat.Text;
                     break;
@@ -194,7 +218,7 @@ namespace Antmicro.Renode.Peripherals.Network
 
         // QISEND - Send Hex/Text String Data
         [AtCommand("AT+QISEND", CommandType.Write)]
-        protected override Response Qisend(int connectionId, int? sendLength = null, string data = null)
+        protected override Response Qisend(int connectionId, int? sendLength = null, string data = null, int? raiMode = null)
         {
             // The BG96 doesn't support non-data mode in AT+QISEND
             if(data != null)

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -21,7 +21,6 @@ namespace Antmicro.Renode.Peripherals
             this.machine = machine;
             sysbus = machine.GetSystemBus(this);
             RegistersCollection = new ByteRegisterCollection(this);
-            DefineRegisters();
         }
 
         public virtual void Reset()
@@ -81,6 +80,11 @@ namespace Antmicro.Renode.Peripherals
         public static ByteRegister Define(this System.Enum o, ByteRegisterCollection c, byte resetValue = 0, string name = "")
         {
             return c.DefineRegister(Convert.ToInt64(o), resetValue);
+        }
+
+        public static ByteRegister DefineConditional(this System.Enum o, IProvidesRegisterCollection<ByteRegisterCollection> p, Func<bool> condition, byte resetValue = 0, string name = "")
+        {
+            return p.RegistersCollection.DefineConditionalRegister(Convert.ToInt64(o), condition, resetValue);
         }
 
         public static ByteRegister Bind(this System.Enum o, IProvidesRegisterCollection<ByteRegisterCollection> p, ByteRegister reg, string name = "")

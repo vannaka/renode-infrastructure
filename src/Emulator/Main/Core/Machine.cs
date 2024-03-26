@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -364,7 +364,7 @@ namespace Antmicro.Renode.Core
 
         public IBusController RegisterBusController(IBusPeripheral peripheral, IBusController controller)
         {
-            using(ObtainPausedState())
+            using(ObtainPausedState(true))
             {
                 if(!peripheralsBusControllers.TryGetValue(peripheral, out var wrapper))
                 {
@@ -407,9 +407,23 @@ namespace Antmicro.Renode.Core
             }
         }
 
-        public IDisposable ObtainPausedState()
+        /// <summary>
+        /// Pauses the machine and returns an <see cref="IDisposable">, disposing which will resume the machine.
+        /// Can be nested, in this case the machine will only be resumed once the last paused state is disposed.
+        /// </summary>
+        /// <param name="internalPause">Specifies whether this pause is due to internal reasons and should not be visible to
+        /// external software, such as GDB. For example, the pause to register a new peripheral is internal; the pause triggered
+        /// by a CPU breakpoint is not.</param>
+        public IDisposable ObtainPausedState(bool internalPause = false)
         {
-            return pausedState.Enter();
+            InternalPause = internalPause;
+            pausedState.Enter();
+            return DisposableWrapper.New(() =>
+            {
+                pausedState.Dispose();
+                // Does not handle nesting, but only the outermost pause could possibly invoke halt callbacks
+                InternalPause = false;
+            });
         }
 
         public void Start()
@@ -511,9 +525,9 @@ namespace Antmicro.Renode.Core
         {
             lock(pausingSync)
             {
-                using(ObtainPausedState())
+                using(ObtainPausedState(true))
                 {
-                    foreach(var resetable in registeredPeripherals.Distinct())
+                    foreach(var resetable in registeredPeripherals.Distinct().ToList())
                     {
                         if(resetable == this)
                         {
@@ -530,13 +544,15 @@ namespace Antmicro.Renode.Core
             }
         }
 
+        public bool InternalPause { get; private set; }
+
         public void RequestResetInSafeState(Action postReset = null, ICollection<IPeripheral> unresetable = null)
         {
             Action softwareRequestedReset = null;
             softwareRequestedReset = () =>
             {
                 LocalTimeSource.SinksReportedHook -= softwareRequestedReset;
-                using(ObtainPausedState())
+                using(ObtainPausedState(true))
                 {
                     foreach(var peripheral in registeredPeripherals.Distinct().Where(p => p != this && !(unresetable?.Contains(p) ?? false)))
                     {
@@ -579,8 +595,9 @@ namespace Antmicro.Renode.Core
             }
             gdbStubs.Clear();
 
-            // ordering below is due to the fact that the CPU can use other peripherals, e.g. Memory so it should be disposed last
-            foreach(var peripheral in GetPeripheralsOfType<IDisposable>().OrderBy(x => x is ICPU ? 0 : 1))
+            // ordering below is due to the fact that the CPU can use other peripherals, e.g. Memory so it should be disposed first
+            // Mapped memory can be used as storage by other disposable peripherals which may want to read it while being disposed
+            foreach(var peripheral in GetPeripheralsOfType<IDisposable>().OrderBy(x => x is ICPU ? 0 : x is IMapped ? 2 : 1))
             {
                 this.DebugLog("Disposing {0}.", GetAnyNameOrTypeName((IPeripheral)peripheral));
                 peripheral.Dispose();
@@ -613,7 +630,7 @@ namespace Antmicro.Renode.Core
                 {
                     if(stopCondition != null && stopCondition())
                     {
-                        Dispose();
+                        Stop();
                     }
                     else
                     {
@@ -1238,7 +1255,7 @@ namespace Antmicro.Renode.Core
 
         private void InnerUnregisterFromParent(IPeripheral peripheral)
         {
-            using(ObtainPausedState())
+            using(ObtainPausedState(true))
             {
                 lock(collectionSync)
                 {
@@ -1281,7 +1298,7 @@ namespace Antmicro.Renode.Core
 
         private void Register(IPeripheral peripheral, IRegistrationPoint registrationPoint, IPeripheral parent)
         {
-            using(ObtainPausedState())
+            using(ObtainPausedState(true))
             {
                 Action executeAfterLock = null;
                 lock(collectionSync)
@@ -1850,7 +1867,7 @@ namespace Antmicro.Renode.Core
                 public void Unregister()
                 {
                     IsActive = false;
-                    using(Machine.ObtainPausedState())
+                    using(Machine.ObtainPausedState(true))
                     {
                         foreach(var p in Peripherals.ToList())
                         {

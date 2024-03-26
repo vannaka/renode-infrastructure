@@ -24,7 +24,7 @@ using Endianess = ELFSharp.ELF.Endianess;
 namespace Antmicro.Renode.Peripherals.CPU
 {
     [GPIO(NumberOfInputs = 2)]
-    public abstract partial class Arm : TranslationCPU, ICPUWithHooks, IPeripheralRegister<SemihostingUart, NullRegistrationPoint>
+    public abstract partial class Arm : TranslationCPU, ICPUWithHooks, IPeripheralRegister<SemihostingUart, NullRegistrationPoint>, IPeripheralRegister<ArmPerformanceMonitoringUnit, NullRegistrationPoint>
     {
         public Arm(string cpuType, IMachine machine, uint cpuId = 0, Endianess endianness = Endianess.LittleEndian, uint? numberOfMPURegions = null) : base(cpuId, cpuType, machine, endianness)
         {
@@ -47,6 +47,24 @@ namespace Antmicro.Renode.Peripherals.CPU
         public void Unregister(SemihostingUart peripheral)
         {
             semihostingUart = null;
+            machine.UnregisterAsAChildOf(this, peripheral);
+        }
+
+        public void Register(ArmPerformanceMonitoringUnit peripheral, NullRegistrationPoint registrationPoint)
+        {
+            if(performanceMonitoringUnit != null)
+            {
+                throw new RegistrationException("A PMU is already registered.");
+            }
+            performanceMonitoringUnit = peripheral;
+            machine.RegisterAsAChildOf(this, peripheral, registrationPoint);
+
+            performanceMonitoringUnit.RegisterCPU(this);
+        }
+
+        public void Unregister(ArmPerformanceMonitoringUnit peripheral)
+        {
+            performanceMonitoringUnit = null;
             machine.UnregisterAsAChildOf(this, peripheral);
         }
 
@@ -275,6 +293,36 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        public ulong GetSystemRegisterValue(string name)
+        {
+            ValidateSystemRegisterAccess(name, isWrite: false);
+
+            return TlibGetSystemRegister(name, 1u /* log_unhandled_access: true */);
+        }
+
+        public void SetSystemRegisterValue(string name, ulong value)
+        {
+            ValidateSystemRegisterAccess(name, isWrite: true);
+
+            TlibSetSystemRegister(name, value, 1u /* log_unhandled_access: true */);
+        }
+
+        private void ValidateSystemRegisterAccess(string name, bool isWrite)
+        {
+            switch((SystemRegisterCheckReturnValue)TlibCheckSystemRegisterAccess(name, isWrite ? 1u : 0u))
+            {
+            case SystemRegisterCheckReturnValue.AccessValid:
+                return;
+            case SystemRegisterCheckReturnValue.AccessorNotFound:
+                var accessName = isWrite ? "Writing" : "Reading";
+                throw new RecoverableException($"{accessName} the {name} register isn't supported.");
+            case SystemRegisterCheckReturnValue.RegisterNotFound:
+                throw new RecoverableException("No such register.");
+            default:
+                throw new ArgumentException("Invalid TlibCheckSystemRegisterAccess return value!");
+            }
+        }
+
         private bool TryRegisterTCMRegion(MappedMemory memory, uint interfaceIndex, uint regionIndex)
         {
             ulong address;
@@ -289,6 +337,14 @@ namespace Antmicro.Renode.Peripherals.CPU
 
             return true;
         }
+
+        [Export]
+        private void ReportPMUOverflow(int counter)
+        {
+            performanceMonitoringUnit?.OnOverflowAction(counter);
+        }
+
+        private ArmPerformanceMonitoringUnit performanceMonitoringUnit;
 
         [Export]
         private uint DoSemihosting()
@@ -351,6 +407,13 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        private enum SystemRegisterCheckReturnValue
+        {
+            RegisterNotFound = 1,
+            AccessorNotFound = 2,
+            AccessValid = 3,
+        }
+
         private readonly List<TCMConfiguration> defaultTCMConfiguration = new List<TCMConfiguration>();
 
         // 649:  Field '...' is never assigned to, and will always have its default value null
@@ -385,6 +448,23 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         [Import]
         private ActionUInt32UInt64UInt64 TlibRegisterTcmRegion;
+
+        [Import]
+        private FuncUInt32StringUInt32 TlibCheckSystemRegisterAccess;
+
+        [Import]
+        // The arguments are: char *name, bool log_unhandled_access.
+        private FuncUInt64StringUInt32 TlibGetSystemRegister;
+
+        [Import]
+        // The arguments are: char *name, uint64_t value, bool log_unhandled_access.
+        private ActionStringUInt64UInt32 TlibSetSystemRegister;
+
+        [Import]
+        public ActionInt32UInt32 TlibUpdatePmuCounters;
+
+        [Import]
+        public ActionUInt32 TlibPmuSetDebug;
 
 #pragma warning restore 649
 

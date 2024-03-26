@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -28,7 +28,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
             commonFifo = new LSM6DSO_FIFO(machine, this, "fifo", MaxFifoWords);
             commonFifo.OnOverrun += UpdateInterrupts;
 
-            DefineRegistersInternal();
+            DefineRegisters();
             Reset();
         }
 
@@ -176,52 +176,6 @@ namespace Antmicro.Renode.Peripherals.Sensors
         public decimal Temperature { get; set; }
 
         protected override void DefineRegisters()
-        {
-            // Intentionally left blank. This method is run from the base class constructor, i.e., before initializing necessary private objects.
-        }
-
-        private void DefineOutputRegistersGroup(Registers firstGroupRegister, string nameFormat, Func<LSM6DSO_Vector3DSample> sampleProvider)
-        {
-            var subsequentRegistersInfo = new SampleReadingRegisterInfo[]
-            {
-                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.X, NameSuffix = "X_L", UpperByte = false},
-                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.X, NameSuffix = "X_H", UpperByte = true},
-                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Y, NameSuffix = "Y_L", UpperByte = false},
-                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Y, NameSuffix = "Y_H", UpperByte = true},
-                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Z, NameSuffix = "Z_L", UpperByte = false},
-                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Z, NameSuffix = "Z_H", UpperByte = true},
-            };
-
-            firstGroupRegister.DefineMany(this, 6, (register, registerOffset) =>
-            {
-                var registerInfo = subsequentRegistersInfo[registerOffset];
-                var name = string.Format(nameFormat, registerInfo.NameSuffix);
-                register.WithValueField(0, 8, FieldMode.Read, name: name,
-                    valueProviderCallback: _ =>
-                    {
-                        var sample = sampleProvider();
-                        if(sample == null)
-                        {
-                            return 0u;
-                        }
-                        Debug.Assert(sample.IsAccelerationSample || sample.IsAngularRateSample, $"Invalid sample: {sample}");
-
-                        var sensitivity = sample.IsAccelerationSample ? accelerationSensitivity : angularRateSensitivity;
-                        var _byte = sample.GetScaledValueByte(registerInfo.Axis, sensitivity, registerInfo.UpperByte, out var realScaledValue);
-
-                        // Log only when reading the lower byte to avoid logging it twice for each value.
-                        if(realScaledValue.HasValue && !registerInfo.UpperByte)
-                        {
-                            var fullScaleSelection = sample.IsAccelerationSample ? $"{GetAccelerationFullScaleValue()}G" : $"{GetAngularRateFullScaleValue()}DPS";
-                            this.Log(LogLevel.Debug, "Invalid value for the current full scale selection ({0}): {1}", fullScaleSelection, realScaledValue.Value);
-                        }
-                        return _byte;
-                    }
-                );
-            });
-        }
-
-        private void DefineRegistersInternal()
         {
             Registers.PinControl.Define(this)
                 // These bits are always set.
@@ -373,6 +327,47 @@ namespace Antmicro.Renode.Peripherals.Sensors
                 .WithTaggedFlag("DEN_DRDY", 7)
                 .WithWriteCallback((_, __) => UpdateInterrupts())
                 ;
+        }
+
+        private void DefineOutputRegistersGroup(Registers firstGroupRegister, string nameFormat, Func<LSM6DSO_Vector3DSample> sampleProvider)
+        {
+            var subsequentRegistersInfo = new SampleReadingRegisterInfo[]
+            {
+                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.X, NameSuffix = "X_L", UpperByte = false},
+                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.X, NameSuffix = "X_H", UpperByte = true},
+                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Y, NameSuffix = "Y_L", UpperByte = false},
+                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Y, NameSuffix = "Y_H", UpperByte = true},
+                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Z, NameSuffix = "Z_L", UpperByte = false},
+                new SampleReadingRegisterInfo { Axis = LSM6DSO_Vector3DSample.Axes.Z, NameSuffix = "Z_H", UpperByte = true},
+            };
+
+            firstGroupRegister.DefineMany(this, 6, (register, registerOffset) =>
+            {
+                var registerInfo = subsequentRegistersInfo[registerOffset];
+                var name = string.Format(nameFormat, registerInfo.NameSuffix);
+                register.WithValueField(0, 8, FieldMode.Read, name: name,
+                    valueProviderCallback: _ =>
+                    {
+                        var sample = sampleProvider();
+                        if(sample == null)
+                        {
+                            return 0u;
+                        }
+                        Debug.Assert(sample.IsAccelerationSample || sample.IsAngularRateSample, $"Invalid sample: {sample}");
+
+                        var sensitivity = sample.IsAccelerationSample ? accelerationSensitivity : angularRateSensitivity;
+                        var _byte = sample.GetScaledValueByte(registerInfo.Axis, sensitivity, registerInfo.UpperByte, out var realScaledValue);
+
+                        // Log only when reading the lower byte to avoid logging it twice for each value.
+                        if(realScaledValue.HasValue && !registerInfo.UpperByte)
+                        {
+                            var fullScaleSelection = sample.IsAccelerationSample ? $"{GetAccelerationFullScaleValue()}G" : $"{GetAngularRateFullScaleValue()}DPS";
+                            this.Log(LogLevel.Debug, "Invalid value for the current full scale selection ({0}): {1}", fullScaleSelection, realScaledValue.Value);
+                        }
+                        return _byte;
+                    }
+                );
+            });
         }
 
         [OnRESDSample(SampleType.Acceleration)]

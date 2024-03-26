@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -13,16 +13,19 @@ namespace Antmicro.Renode.Peripherals.CPU
 {
     public interface IARMSingleSecurityStateCPU : ICPU
     {
+        ExceptionLevel ExceptionLevel { get; }
+
         Affinity Affinity { get; }
         // This kind of CPU is always in a specific Security State and it can't be changed
         SecurityState SecurityState { get; }
+
+        bool FIQMaskOverride { get; }
+        bool IRQMaskOverride { get; }
     }
 
     public interface IARMTwoSecurityStatesCPU : IARMSingleSecurityStateCPU
     {
         void GetAtomicExceptionLevelAndSecurityState(out ExceptionLevel exceptionLevel, out SecurityState securityState);
-
-        ExceptionLevel ExceptionLevel { get; }
 
         // This property should return false if CPU doesn't support EL3
         bool IsEL3UsingAArch32State { get; }
@@ -57,11 +60,13 @@ namespace Antmicro.Renode.Peripherals.CPU
     }
 
     // GIC should use GPIO#0 of an ARM CPU to signal IRQ and GPIO#1 to signal FIQ
-    // An ARM CPU should be connected to a GIC following the convention `[<N*2>-<N*2+1>] -> cpuN@[0-1]`";
+    // An ARM CPU should be connected to a GIC following the convention `[<N*4>-<N*4+3>] -> cpuN@[0-3]`";
     public enum InterruptSignalType
     {
-        IRQ = 0,
-        FIQ = 1,
+        IRQ  = 0,
+        FIQ  = 1,
+        vIRQ = 2,
+        vFIQ = 3,
     }
 
     public enum SecurityState

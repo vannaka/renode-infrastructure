@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -80,7 +80,15 @@ namespace Antmicro.Renode.Peripherals.IRQControllers.PLIC
                 this.Log(LogLevel.Noisy, "Setting GPIO number #{0} to value {1}", number, value);
                 var irq = irqSources[number];
                 irq.State = value;
-                irq.IsPending |= value;
+
+                if(value)
+                {
+                    foreach(var irqContext in irqContexts)
+                    {
+                        irqContext.MarkSourceAsPending(irq);
+                    }
+                }
+
                 RefreshInterrupts();
             }
         }

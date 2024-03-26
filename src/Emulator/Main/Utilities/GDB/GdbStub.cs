@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -111,8 +111,16 @@ namespace Antmicro.Renode.Utilities.GDB
                         break;
                     }
                     return;
-                case HaltReason.Step:
                 case HaltReason.Pause:
+                    if(commandsManager.Machine.InternalPause)
+                    {
+                        // Don't set Trap signal when the pause is internal as execution will
+                        // be resumed after the reset is completed. This will cause GDB to stop and the emulation to continue
+                        // resulting in a desync (eg. breakpoints will not be triggered)
+                        return;
+                    }
+                    goto case HaltReason.Step;
+                case HaltReason.Step:
                     if(commandsManager.Machine.SystemBus.IsMultiCore)
                     {
                         commandsManager.SelectCpuForDebugging(cpuId);

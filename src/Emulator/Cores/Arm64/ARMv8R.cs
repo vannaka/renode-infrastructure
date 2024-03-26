@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -21,10 +21,9 @@ namespace Antmicro.Renode.Peripherals.CPU
 {
     public partial class ARMv8R : TranslationCPU, IARMSingleSecurityStateCPU, IPeripheralRegister<ARM_GenericTimer, NullRegistrationPoint>
     {
-        public ARMv8R(string cpuType, IMachine machine, ARM_GenericInterruptController genericInterruptController, uint cpuId = 0, Endianess endianness = Endianess.LittleEndian, SecurityState securityState = SecurityState.NonSecure, uint mpuRegionsCount = 16, ulong defaultHVBARValue = 0, ulong defaultVBARValue = 0, uint mpuHyperRegionsCount = 16)
+        public ARMv8R(string cpuType, IMachine machine, ARM_GenericInterruptController genericInterruptController, uint cpuId = 0, Endianess endianness = Endianess.LittleEndian, uint mpuRegionsCount = 16, ulong defaultHVBARValue = 0, ulong defaultVBARValue = 0, uint mpuHyperRegionsCount = 16)
                 : base(cpuId, cpuType, machine, endianness, CpuBitness.Bits64)
         {
-            SecurityState = securityState;
             Affinity = new Affinity(cpuId);
             this.defaultHVBARValue = defaultHVBARValue;
             this.defaultVBARValue = defaultVBARValue;
@@ -57,7 +56,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         {
             ValidateSystemRegisterAccess(name, isWrite: false);
 
-            return TlibGetSystemRegister(name);
+            return TlibGetSystemRegister(name, 1u /* log_unhandled_access: true */);
         }
 
         public void SetAvailableExceptionLevels(bool el2Enabled, bool el3Enabled)
@@ -85,7 +84,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         {
             ValidateSystemRegisterAccess(name, isWrite: true);
 
-            TlibSetSystemRegister(name, value);
+            TlibSetSystemRegister(name, value, 1u /* log_unhandled_access: true */);
         }
 
         public void Register(ARM_GenericTimer peripheral, NullRegistrationPoint registrationPoint)
@@ -169,8 +168,32 @@ namespace Antmicro.Renode.Peripherals.CPU
             return true;
         }
 
+        public ExceptionLevel ExceptionLevel
+        {
+            get
+            {
+                lock(elAndSecurityLock)
+                {
+                    return exceptionLevel;
+                }
+            }
+        }
+
+        public SecurityState SecurityState
+        {
+            get
+            {
+                lock(elAndSecurityLock)
+                {
+                    return securityState;
+                }
+            }
+        }
+
+        public bool FIQMaskOverride => (GetSystemRegisterValue("hcr") & 0b01000) != 0;
+        public bool IRQMaskOverride => (GetSystemRegisterValue("hcr") & 0b10000) != 0;
+
         public Affinity Affinity { get; }
-        public SecurityState SecurityState { get; private set; }
 
         protected override Interrupt DecodeInterrupt(int number)
         {
@@ -180,6 +203,10 @@ namespace Antmicro.Renode.Peripherals.CPU
                     return Interrupt.Hard;
                 case InterruptSignalType.FIQ:
                     return Interrupt.TargetExternal1;
+                case InterruptSignalType.vIRQ:
+                    return Interrupt.TargetExternal2;
+                case InterruptSignalType.vFIQ:
+                    return Interrupt.TargetExternal3;
                 default:
                     this.Log(LogLevel.Error, "Unexpected interrupt type for IRQ#{0}", number);
                     throw InvalidInterruptNumberException;
@@ -249,7 +276,11 @@ namespace Antmicro.Renode.Peripherals.CPU
         [Export]
         private void OnExecutionModeChanged(uint el, uint isSecure)
         {
-            this.Log(LogLevel.Debug, "Unimplemented OnExecutionModeChanged(el={0}, isSecure={1}) was called.", el, isSecure);
+            lock(elAndSecurityLock)
+            {
+                exceptionLevel = (ExceptionLevel)el;
+                securityState = isSecure != 0 ? SecurityState.Secure : SecurityState.NonSecure;
+            }
         }
 
         private void ValidateSystemRegisterAccess(string name, bool isWrite)
@@ -273,8 +304,11 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        private ExceptionLevel exceptionLevel;
+        private SecurityState securityState;
         private ARM_GenericTimer timer;
 
+        private readonly object elAndSecurityLock = new object();
         private readonly ARM_GenericInterruptController gic;
         private readonly ulong defaultHVBARValue;
         private readonly ulong defaultVBARValue;
@@ -301,13 +335,15 @@ namespace Antmicro.Renode.Peripherals.CPU
         private FuncUInt32StringUInt32 TlibCheckSystemRegisterAccess;
 
         [Import]
-        private FuncUInt64String TlibGetSystemRegister;
+        // The arguments are: char *name, bool log_unhandled_access.
+        private FuncUInt64StringUInt32 TlibGetSystemRegister;
 
         [Import]
         private FuncUInt32UInt32UInt32 TlibSetAvailableEls;
 
         [Import]
-        private ActionStringUInt64 TlibSetSystemRegister;
+        // The arguments are: char *name, uint64_t value, bool log_unhandled_access.
+        private ActionStringUInt64UInt32 TlibSetSystemRegister;
 
         [Import]
         private ActionUInt32UInt32 TlibSetMpuRegionsCount;

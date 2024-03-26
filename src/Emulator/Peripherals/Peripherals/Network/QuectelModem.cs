@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -11,6 +11,8 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
+using Antmicro.Renode.Peripherals.Timers;
+using Antmicro.Renode.Time;
 using Antmicro.Renode.Utilities;
 
 namespace Antmicro.Renode.Peripherals.Network
@@ -24,9 +26,17 @@ namespace Antmicro.Renode.Peripherals.Network
             this.imeiNumber = imeiNumber;
             this.softwareVersionNumber = softwareVersionNumber;
             this.serialNumber = serialNumber;
+            deepsleepTimer = new LimitTimer(machine.ClockSource, 1, this, "T3324", direction: Direction.Ascending, workMode: WorkMode.OneShot, eventEnabled: true);
+            deepsleepTimer.LimitReached += () =>
+            {
+                this.Log(LogLevel.Noisy, "T3324 timer timeout");
+                SendSignalingConnectionStatus(false);
+                EnterDeepsleep();
+            };
             Connections = new Dictionary<int, IGPIO>
             {
                 {0, vddExt},
+                {1, netLight},
             };
 
             Reset();
@@ -149,6 +159,8 @@ namespace Antmicro.Renode.Peripherals.Network
         public int EnhancedCoverageLevel { get; set; } = 0;
         public int TransmitPower { get; set; } = 0;
         public NetworkRegistrationStates NetworkRegistrationState { get; set; } = NetworkRegistrationStates.NotRegisteredNotSearching;
+        public PublicLandMobileNetworkSearchingState ModemPLMNState { get; set; } = PublicLandMobileNetworkSearchingState.Selected;
+        public int PLMNSearchTime { get; set; } = 0;
         public bool DeepsleepOnRellock { get; set; } = false;
         // The delay before sending the +CSCON URC in virtual milliseconds
         public ulong CsconDelay { get; set; } = 500;
@@ -162,8 +174,26 @@ namespace Antmicro.Renode.Peripherals.Network
         public decimal SleepDuration { get; set; } = 0m;
         public decimal RxTime { get; set; } = 0m;
         public decimal TxTime { get; set; } = 0m;
+        // These parameters should be set according to expectations of network behavior.
+        public ulong ClosePortInactivityDisconnectDelay { get; set; }
+        public ulong SendDataInactivityDisconnectDelay { get; set; }
+        public ulong SendDataActivityConnectDelay { get; set; } = 550;
+        public bool SendCSCONOnChangeOnly { get; set; } = true;
 
         public int SignalStrength => (int?)Misc.RemapNumber(Rssi, -113m, -51m, 0, 31) ?? 0;
+        public int ActiveTimeSeconds => ConvertEncodedStringToSeconds(ActiveTime, ModemTimerType.ActiveTimeT3324);
+        public int PeriodicTauSeconds => ConvertEncodedStringToSeconds(PeriodicTau, ModemTimerType.PeriodicTauT3412);
+
+        protected override Response HandleCommand(string command)
+        {
+            if(deepsleepTimer.Enabled)
+            {
+                // Restart deep sleep timer after receiving any AT command.
+                deepsleepTimer.Value = 0;
+                this.Log(LogLevel.Noisy, "'{0}' command received: Defer deepsleep by {1} seconds", command, ActiveTimeSeconds);
+            }
+            return base.HandleCommand(command);
+        }
 
         // ATI - Display Product Identification Information
         [AtCommand("ATI")]
@@ -186,7 +216,7 @@ namespace Antmicro.Renode.Peripherals.Network
             return Ok; // stub
         }
 
-        protected virtual string CeregContent(bool urc = false)
+        protected virtual string CeregContent(bool urc = false, string prefix = "+CEREG")
         {
             var fragments = new List<string>();
             // The URC form of CEREG does not report the type, the command response form does.
@@ -225,7 +255,13 @@ namespace Antmicro.Renode.Peripherals.Network
                 fragments.Add(PeriodicTau.SurroundWith("\""));
             }
 
-            return "+CEREG: " + string.Join(",", fragments);
+            return prefix + ": " + string.Join(",", fragments);
+        }
+
+        protected virtual string CregContent(bool urc = false)
+        {
+            // Signature of +CREG message is the same as of +CEREG.
+            return CeregContent(urc, "+CREG");
         }
 
         // CEREG - EPS Network Registration Status
@@ -240,6 +276,19 @@ namespace Antmicro.Renode.Peripherals.Network
 
         [AtCommand("AT+CEREG", CommandType.Read)]
         protected virtual Response CeregRead() => Ok.WithParameters(CeregContent());
+
+        // CREG - Network Registration
+        [AtCommand("AT+CREG", CommandType.Write)]
+        protected virtual Response CregWrite(NetworkRegistrationUrcType type)
+        {
+            networkRegistrationUrcType = type;
+            // Queue a CREG URC in response to the write, use the same delay as for CEREG URC
+            ExecuteWithDelay(() => SendString(CregContent(true)), CeregDelay);
+            return Ok; // stub, should disable or enable network registration URC
+        }
+
+        [AtCommand("AT+CREG", CommandType.Read)]
+        protected virtual Response CregRead() => Ok.WithParameters(CregContent());
 
         // CESQ - Extended Signal Quality
         [AtCommand("AT+CESQ")]
@@ -256,12 +305,28 @@ namespace Antmicro.Renode.Peripherals.Network
         [AtCommand("AT+CFUN", CommandType.Write)]
         protected virtual Response Cfun(FunctionalityLevel functionalityLevel = FunctionalityLevel.Full, int reset = 0)
         {
+            // Reset option isn't taken into account yet, so the new functionality level
+            // is always activated immediately and remains valid after deep sleep wakeup.
+            this.functionalityLevel = functionalityLevel;
+
+            if(signalingConnectionStatusReportingEnabled && functionalityLevel == FunctionalityLevel.Full)
+            {
+                var d = 0UL;
+                // We do both of the sends here after a delay to accomodate software
+                // which might not expect the "instant" reply which would otherwise happen.
+                ExecuteWithDelay(() => SendSignalingConnectionStatus(true), d += CsconDelay);
+                ExecuteWithDelay(() => SendString($"+IP: {NetworkIp}"), d += IpDelay); // IP URC means successfully registered
+            }
+
             // Notify the DTE about the registration status to emulate the behavior
             // of a real modem where it might change in response to the functionality
             // level being changed.
             ExecuteWithDelay(() => SendString(CeregContent(true)), CeregDelay);
             return Ok; // stub
         }
+
+        [AtCommand("AT+CFUN", CommandType.Read)]
+        protected virtual Response Cfun() => Ok.WithParameters($"+CFUN: {(int)functionalityLevel}");
 
         // CGDCONT - Define PDP Context
         [AtCommand("AT+CGDCONT", CommandType.Read)]
@@ -409,11 +474,19 @@ namespace Antmicro.Renode.Peripherals.Network
         [AtCommand("AT+QCCID")]
         protected virtual Response Qccid() => Ok.WithParameters($"+QCCID: {IccidNumber}");
 
+        // CCLK - Set and Get Current Date and Time
+        [AtCommand("AT+CCLK", CommandType.Write)]
+        protected virtual Response CclkWrite(string dateTime)
+        {
+            this.Log(LogLevel.Warning, "Ignoring attempt to set date/time to '{0}'", dateTime);
+            return Ok; // stub
+        }
+
         // QCFG - System Configuration
         [AtCommand("AT+QCFG", CommandType.Write)]
-        protected virtual Response Qcfg(string function, int value)
+        protected virtual Response Qcfg(string function, params int[] args)
         {
-            this.Log(LogLevel.Warning, "Config value '{0}' set to {1}, not supported by this modem", function, value);
+            this.Log(LogLevel.Warning, "Config value '{0}' set to {1}, not supported by this modem", function, string.Join(", ", args));
             return Error;
         }
 
@@ -499,23 +572,50 @@ namespace Antmicro.Renode.Peripherals.Network
         [AtCommand("AT+QSCLK", CommandType.Write)]
         protected virtual Response QsclkWrite(int mode = 1)
         {
-            if(mode == 1)
+            switch(mode)
             {
-                // The signaling connection goes inactive when sleep mode is enabled.
-                ExecuteWithDelay(() =>
+                case 0: // Disable sleep modes.
                 {
-                    SendSignalingConnectionStatus(false);
-
-                    // Also, if we are configured to enter deep sleep when the sleep
-                    // lock is released, we also use sleep mode being enabled as our
-                    // cue to enter it.
-                    if(DeepsleepOnRellock)
+                    deepsleepTimer.Enabled = false;
+                    break;
+                }
+                case 1: // Enable deep sleep mode.
+                {
+                    if(ActiveTimeSeconds != 0)
                     {
-                        EnterDeepsleep();
+                        deepsleepTimer.Value = 0;
+                        deepsleepTimer.Limit = (ulong)ActiveTimeSeconds;
+                        deepsleepTimer.Enabled = true;
+                        // Defer entering deep sleep until timer timeouts.
+                        this.Log(LogLevel.Noisy, "Defer deepsleep by {0} seconds", ActiveTimeSeconds);
+                        break;
                     }
-                }, CsconDelay);
+                    // The signaling connection goes inactive when sleep mode is enabled.
+                    ExecuteWithDelay(() =>
+                    {
+                        SendSignalingConnectionStatus(false);
+
+                        // Also, if we are configured to enter deep sleep when the sleep
+                        // lock is released, we also use sleep mode being enabled as our
+                        // cue to enter it.
+                        if(DeepsleepOnRellock)
+                        {
+                            EnterDeepsleep();
+                        }
+                    }, CsconDelay);
+                    break;
+                }
+                case 2: // Enable light sleep mode.
+                {
+                    // Light sleep mode is not implemented.
+                    break;
+                }
+                default:
+                {
+                    return Error;
+                }
             }
-            return Ok; // stub
+            return Ok;
         }
 
         // QIOPEN - Open a Socket Service
@@ -546,6 +646,11 @@ namespace Antmicro.Renode.Peripherals.Network
                 else
                 {
                     this.Log(LogLevel.Debug, "Connection {0} opened successfully", connectionId);
+
+                    if(serviceType == ServiceType.Tcp)
+                    {
+                        ExecuteWithDelay(() => SendSignalingConnectionStatus(true), CsconDelay + 50);
+                    }
                 }
                 sockets[connectionId] = service;
                 SendString($"+QIOPEN: {connectionId},{(service == null ? 1 : 0)}");
@@ -566,10 +671,14 @@ namespace Antmicro.Renode.Peripherals.Network
             sockets[connectionId]?.Dispose();
             sockets[connectionId] = null;
             // If all sockets are closed the signaling connection goes inactive.
-            if(sockets.All(s => s == null))
+            // After the port is closed, modem disconnects after a period of inactivity.
+            ExecuteWithDelay(() =>
             {
-                SendSignalingConnectionStatus(false);
-            }
+                if(sockets.All(s => s == null))
+                {
+                    SendSignalingConnectionStatus(false);
+                }
+            }, ClosePortInactivityDisconnectDelay);
             return Ok.WithTrailer("CLOSE OK");
         }
 
@@ -600,9 +709,14 @@ namespace Antmicro.Renode.Peripherals.Network
             {
                 case DataFormat.Hex:
                     var hexBytes = BitConverter.ToString(readBytes).Replace("-", "");
-                    return Ok.WithParameters(qirdResponseHeader + hexBytes);
+                    return Ok.WithParameters(qirdResponseHeader + hexBytes.SurroundWith(dataOutputSurrounding));
                 case DataFormat.Text:
-                    return Ok.WithParameters(StringEncoding.GetBytes(qirdResponseHeader).Concat(readBytes).ToArray());
+                    var dataOutputSurroundingBytes = StringEncoding.GetBytes(dataOutputSurrounding);
+                    return Ok.WithParameters(StringEncoding.GetBytes(qirdResponseHeader)
+                                                        .Concat(dataOutputSurroundingBytes)
+                                                        .Concat(readBytes)
+                                                        .Concat(dataOutputSurroundingBytes)
+                                                        .ToArray());
                 default:
                     throw new InvalidOperationException($"Invalid {nameof(receiveDataFormat)}");
             }
@@ -610,7 +724,7 @@ namespace Antmicro.Renode.Peripherals.Network
 
         // QISEND - Send Hex/Text String Data
         [AtCommand("AT+QISEND", CommandType.Write)]
-        protected virtual Response Qisend(int connectionId, int? sendLength = null, string data = null)
+        protected virtual Response Qisend(int connectionId, int? sendLength = null, string data = null, int? raiMode = null)
         {
             if(!IsValidConnectionId(connectionId) || sockets[connectionId] == null)
             {
@@ -625,14 +739,41 @@ namespace Antmicro.Renode.Peripherals.Network
             }
             else if(data != null) // Send data in non-data mode
             {
+                byte[] bytes;
+                switch(sendDataFormat)
+                {
+                    case DataFormat.Hex:
+                        bytes = Misc.HexStringToByteArray(data);
+                        break;
+                    case DataFormat.Text:
+                        bytes = StringEncoding.GetBytes(data);
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Invalid {nameof(sendDataFormat)}");
+                }
                 // Non-data mode is only supported with a fixed length
-                if(sendLength == null || data.Length != sendLength)
+                if(sendLength == null || bytes.Length != sendLength)
                 {
                     return Error;
                 }
-                this.Log(LogLevel.Warning, "ConnectionId {0} requested send of '{1}' in non-data mode, not implemented",
-                    connectionId, data);
-                return Ok.WithTrailer(SendOk);
+                else if(raiMode.HasValue)
+                {
+                    if(raiMode.Value < 0 || raiMode.Value > 2)
+                    {
+                        return Error;
+                    }
+                    this.Log(LogLevel.Debug, "QISEND: NB-IoT Release Assistance Indication set to {0}", raiMode);
+                }
+                this.Log(LogLevel.Debug, "ConnectionId {0} requested send of '{1}' in non-data mode",
+                    connectionId, BitConverter.ToString(bytes));
+
+                SendSocketData(bytes, connectionId);
+                // After data is sent, modem disconnects after a period of inactivity.
+                ExecuteWithDelay(() =>
+                {
+                    SendSignalingConnectionStatus(false);
+                }, SendDataInactivityDisconnectDelay);
+                return null;
             }
             else // Send data (fixed or variable-length) in data mode
             {
@@ -645,23 +786,7 @@ namespace Antmicro.Renode.Peripherals.Network
                         this.Log(LogLevel.Debug, "ConnectionId {0} requested send of '{1}' in data mode",
                             connectionId, BitConverter.ToString(bytes));
 
-                        string sendResponse;
-                        if(sockets[connectionId].Send(bytes))
-                        {
-                            sendResponse = SendOk;
-                        }
-                        else
-                        {
-                            sendResponse = SendFailed;
-                            this.Log(LogLevel.Warning, "Failed to send data to connection {0}", connectionId);
-                        }
-                        // We can send the OK (the return value of this command) immediately,
-                        // but we have to wait before SEND OK/SEND FAIL if the network is too fast
-                        ExecuteWithDelay(() => SendString(sendResponse), 50);
-                        // A successful send means the signaling connection became active, but this
-                        // happens after the actual send notification hence the additional delay on
-                        // top of CsconDelay.
-                        ExecuteWithDelay(() => SendSignalingConnectionStatus(true), CsconDelay + 50);
+                        SendSocketData(bytes, connectionId);
                     });
                 });
                 return null;
@@ -675,6 +800,27 @@ namespace Antmicro.Renode.Peripherals.Network
         protected virtual bool IsValidContextId(int id)
         {
             return id >= 1 && id <= 16;
+        }
+
+        protected void SendSocketData(byte[] bytes, int connectionId)
+        {
+            string sendResponse;
+            if(sockets[connectionId].Send(bytes))
+            {
+                sendResponse = SendOk;
+            }
+            else
+            {
+                sendResponse = SendFailed;
+                this.Log(LogLevel.Warning, "Failed to send data to connection {0}", connectionId);
+            }
+            SendResponse(Ok);
+            // We can send the OK (the return value of this command) immediately,
+            // but we have to wait before SEND OK/SEND FAIL if the network is too fast
+            ExecuteWithDelay(() => SendString(sendResponse), 50);
+            // A successful send means the signaling connection became active, but this
+            // happens after the actual send notification hence the additional delay.
+            ExecuteWithDelay(() => SendSignalingConnectionStatus(true), SendDataActivityConnectDelay);
         }
 
         protected void EnterDeepsleep()
@@ -709,11 +855,12 @@ namespace Antmicro.Renode.Peripherals.Network
             }
 
             ReportNbiotEvent(enable ? NbiotEvent.EnterPowerSavingMode : NbiotEvent.ExitPowerSavingMode);
+            powerSavingModeActive = enable;
         }
 
         protected void SendSignalingConnectionStatus(bool active)
         {
-            if(signalingConnectionActive == active)
+            if(SendCSCONOnChangeOnly && signalingConnectionActive == active)
             {
                 return;
             }
@@ -760,6 +907,19 @@ namespace Antmicro.Renode.Peripherals.Network
             }
         }
 
+        // NETLIGHT pin is controlled by AT+QLEDMODE (BC660K, BC66) or AT+QCFG="ledmode" (BG96)
+        // You can implement exact AT commands for particular models using this helper.
+        protected Response SetNetLightMode(int ledMode)
+        {
+            if(ledMode < 0 || ledMode > 1)
+            {
+                this.Log(LogLevel.Warning, "Invalid mode for NETLIGHT pin: {0}", ledMode);
+                return Error;
+            }
+            netLightMode = ledMode;
+            return Ok;
+        }
+
         protected abstract string Vendor { get; }
         protected abstract string ModelName { get; }
         protected abstract string Revision { get; }
@@ -774,12 +934,17 @@ namespace Antmicro.Renode.Peripherals.Network
         protected DataFormat sendDataFormat = DataFormat.Text;
         protected DataFormat receiveDataFormat = DataFormat.Text;
         protected string dataOutputSeparator = CrLf;
+        protected string dataOutputSurrounding = ""; // for specific models it can be overriden in the constructor
         protected bool deepSleepEventEnabled = false;
         protected bool powerSavingModeEventEnabled;
         protected bool signalingConnectionStatusReportingEnabled;
+        protected bool outOfServiceAreaUrcEnabled;
         protected NetworkRegistrationUrcType networkRegistrationUrcType;
+        protected int netLightMode;
+        protected FunctionalityLevel functionalityLevel;
 
         protected readonly string imeiNumber;
+        protected readonly LimitTimer deepsleepTimer;
 
         private Response MobileTerminationError(int errorCode)
         {
@@ -849,6 +1014,90 @@ namespace Antmicro.Renode.Peripherals.Network
             return true;
         }
 
+        // Return encoded string that represents the greatest available value
+        // that is not greater than the requested one.
+        protected string ConvertSecondsToEncodedString(int t, ModemTimerType timerType)
+        {
+            IReadOnlyDictionary<byte, int> keyMap;
+            switch(timerType)
+            {
+                case ModemTimerType.ActiveTimeT3324:
+                {
+                    keyMap = activeTimeUnitToSecondsMultiplier;
+                    break;
+                }
+                case ModemTimerType.PeriodicTauT3412:
+                {
+                    keyMap = periodicTauTimeUnitToSecondsMultiplier;
+                    break;
+                }
+                default:
+                {
+                    throw new ArgumentException("Invalid timer type");
+                }
+            }
+
+            byte selectedKey = 0b111;
+            int selectedValue = 0;
+
+            foreach(var entry in keyMap.OrderByDescending(x => x.Value))
+            {
+                if(t >= entry.Value)
+                {
+                    selectedKey = entry.Key;
+                    selectedValue = entry.Value;
+                    break;
+                }
+            }
+
+            selectedValue = selectedValue == 0 ? 0 : t / selectedValue;
+
+            const int timerValueWidth = 5;
+            const int maxTimerValue = (1 << timerValueWidth) - 1; // 5 bits for coding timer value
+            var timeByteCoded = selectedKey << timerValueWidth | (selectedValue & maxTimerValue);
+
+            return Convert.ToString(timeByteCoded, 2).PadLeft(8, '0');
+        }
+
+        protected int ConvertEncodedStringToSeconds(string encoded, ModemTimerType timerType)
+        {
+            IReadOnlyDictionary<byte, int> keyMap;
+            int defaultMultiplier;
+            switch(timerType)
+            {
+                case ModemTimerType.ActiveTimeT3324:
+                {
+                    keyMap = activeTimeUnitToSecondsMultiplier;
+                    defaultMultiplier = ActiveTimeDefaultUnitMultiplier;
+                    break;
+                }
+                case ModemTimerType.PeriodicTauT3412:
+                {
+                    keyMap = periodicTauTimeUnitToSecondsMultiplier;
+                    defaultMultiplier = PeriodicTauDefaultUnitMultiplier;
+                    break;
+                }
+                default:
+                {
+                    throw new ArgumentException("Invalid timer type");
+                }
+            }
+
+            if(!Misc.TryParseBitPattern(encoded, out var parsed, out _))
+            {
+                this.Log(LogLevel.Warning, "Unable to decode time code '{0}' - should be a bit-string", encoded);
+                return 0;
+            }
+            var timerValue = BitHelper.GetValue((byte)parsed, 0, 5);
+            var unit = BitHelper.GetValue((byte)parsed, 5, 3);
+
+            if(keyMap.TryGetValue(unit, out var multiplier))
+            {
+                return multiplier * timerValue;
+            }
+            return defaultMultiplier * timerValue;
+        }
+
         // When this is set to Numeric or Verbose, MT-related errors are reported with "+CME ERROR: "
         // instead of the plain "ERROR". This does not apply to syntax errors, invalid parameter
         // errors or Terminal Adapter functionality.
@@ -863,7 +1112,29 @@ namespace Antmicro.Renode.Peripherals.Network
         private readonly string softwareVersionNumber;
         private readonly string serialNumber;
         private readonly IGPIO vddExt = new GPIO();
+        private readonly IGPIO netLight = new GPIO();
         private readonly SocketService[] sockets = new SocketService[NumberOfConnections];
+
+        private readonly IReadOnlyDictionary<byte, int> activeTimeUnitToSecondsMultiplier = new Dictionary<byte, int>
+        {
+            { 0b111, 0 },
+            { 0b000, 2 },
+            { 0b001, 60 },
+            { 0b010, 6 * 60 }
+        };
+
+        private readonly IReadOnlyDictionary<byte, int> periodicTauTimeUnitToSecondsMultiplier = new Dictionary<byte, int>
+        {
+            { 0b111, 0 },
+            { 0b011, 2 },
+            { 0b100, 30 },
+            { 0b101, 60 },
+            { 0b000, 10 * 60 },
+            { 0b001, 60 * 60 },
+            { 0b010, 10 * 60 * 60 },
+            { 0b110, 320 * 60 * 60 }
+        };
+
         private const string DefaultImeiNumber = "866818039921444";
         private const string DefaultSoftwareVersionNumber = "31";
         private const string DefaultSerialNumber = "<serial number>";
@@ -872,6 +1143,8 @@ namespace Antmicro.Renode.Peripherals.Network
         private const string SendFailed = "SEND FAIL";
         private const string ModemReady = "RDY";
         private const int NumberOfConnections = 4;
+        private const int ActiveTimeDefaultUnitMultiplier = 60;
+        private const int PeriodicTauDefaultUnitMultiplier = 60 * 60;
 
         public enum NetworkRegistrationStates
         {
@@ -881,6 +1154,20 @@ namespace Antmicro.Renode.Peripherals.Network
             RegistrationDenied,
             Unknown,
             RegisteredRoaming,
+        }
+
+        public enum PublicLandMobileNetworkSearchingState
+        {
+            SearchingInactive,
+            Searching,
+            Selected,
+            OutOfService
+        }
+
+        protected enum ModemTimerType
+        {
+            ActiveTimeT3324,
+            PeriodicTauT3412
         }
 
         protected enum MobileTerminationResultCodeMode
@@ -925,6 +1212,7 @@ namespace Antmicro.Renode.Peripherals.Network
             Minimum,
             Full,
             RfTransmitReceiveDisabled = 4,
+            UsimDisabled = 7,
         }
 
         protected enum NetworkRegistrationUrcType

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -36,12 +36,21 @@ namespace Antmicro.Renode.Peripherals.CPU
             customInstructionsMapping = new Dictionary<ulong, Action<UInt64>>();
             this.nmiVectorLength = nmiVectorLength;
             this.nmiVectorAddress = nmiVectorAddress;
-            architectureDecoder = new ArchitectureDecoder(this, cpuType);
+
+            UserState = new Dictionary<string, object>();
+
+            ChildCollection = new Dictionary<int, ICFU>();
+
+            customOpcodes = new List<Tuple<string, ulong, ulong>>();
+            postOpcodeExecutionHooks = new List<Action<ulong>>();
+            postGprAccessHooks = new Action<bool>[NumberOfGeneralPurposeRegisters];
+
+            architectureDecoder = new ArchitectureDecoder(machine, this, cpuType);
             EnableArchitectureVariants();
 
             UpdateNMIVector();
 
-            TlibAllowUnalignedAccesses(allowUnalignedAccesses ? 1 : 0);
+            AllowUnalignedAccesses = allowUnalignedAccesses;
 
             try
             {
@@ -52,14 +61,6 @@ namespace Antmicro.Renode.Peripherals.CPU
             {
                 throw new ConstructionException(string.Format("Unsupported interrupt mode: 0x{0:X}", interruptMode));
             }
-
-            UserState = new Dictionary<string, object>();
-
-            ChildCollection = new Dictionary<int, ICFU>();
-
-            customOpcodes = new List<Tuple<string, ulong, ulong>>();
-            postOpcodeExecutionHooks = new List<Action<ulong>>();
-            postGprAccessHooks = new Action<bool>[NumberOfGeneralPurposeRegisters];
         }
 
         public void Register(ICFU cfu, NumberRegistrationPoint<int> registrationPoint)
@@ -148,6 +149,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         public override void Reset()
         {
             base.Reset();
+            pcWrittenFlag = false;
             ShouldEnterDebugMode = true;
             EnableArchitectureVariants();
             foreach(var key in simpleCSRs.Keys.ToArray())
@@ -155,6 +157,7 @@ namespace Antmicro.Renode.Peripherals.CPU
                 simpleCSRs[key] = 0;
             }
             UserState.Clear();
+            SetPCFromResetVector();
         }
 
         public void RegisterCustomCSR(string name, uint number, PrivilegeLevel mode)
@@ -288,6 +291,28 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        public ulong ResetVector
+        {
+            get => resetVector;
+            set
+            {
+                resetVector = value;
+                SetPCFromResetVector();
+            }
+        }
+
+        private void SetPCFromResetVector()
+        {
+            // Prevents overwriting PC if it's been set already (e.g. by LoadELF).
+            // The pcWrittenFlag is automatically set when setting PC so let's unset it.
+            // Otherwise, only the first ResetVector change would be propagated to PC.
+            if(!pcWrittenFlag)
+            {
+                PC = ResetVector;
+                pcWrittenFlag = false;
+            }
+        }
+
         public bool WfiAsNop
         {
             get => neverWaitForInterrupt;
@@ -384,6 +409,11 @@ namespace Antmicro.Renode.Peripherals.CPU
         }
 
         public IEnumerable<InstructionSet> ArchitectureSets => architectureDecoder.InstructionSets;
+
+        public bool AllowUnalignedAccesses
+        {
+            set => TlibAllowUnalignedAccesses(value ? 1 : 0);
+        }
 
         public abstract RegisterValue VLEN { get; }
 
@@ -664,6 +694,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         private uint? nmiVectorLength;
 
         private bool pcWrittenFlag;
+        private ulong resetVector = DefaultResetVector;
 
         private readonly IRiscVTimeProvider timeProvider;
 
@@ -831,6 +862,7 @@ namespace Antmicro.Renode.Peripherals.CPU
             BS = 0x4 << AdditionalExtensionOffset,
             ICSR = 0x5 << AdditionalExtensionOffset,
             IFENCEI = 0x6 << AdditionalExtensionOffset,
+            ZFH = 0x7 << AdditionalExtensionOffset,
         }
 
         public enum InterruptMode
@@ -865,9 +897,10 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         private class ArchitectureDecoder
         {
-            public ArchitectureDecoder(BaseRiscV parent, string architectureString)
+            public ArchitectureDecoder(IMachine machine, BaseRiscV parent, string architectureString)
             {
                 this.parent = parent;
+                this.machine = machine;
                 instructionSets = new List<InstructionSet>();
                 standardExtensions = new List<StandardInstructionSetExtensions>();
 
@@ -886,11 +919,23 @@ namespace Antmicro.Renode.Peripherals.CPU
 
             private void Decode(string architectureString)
             {
-                // Example cpuType string we would like to handle here: "rv64gcv_zba_zbb_zbc_zbs".
-                var parts = architectureString.ToUpper().Replace("_", "").Split('Z');
+                // Example cpuType string we would like to handle here: "rv64gcv_zba_zbb_zbc_zbs_xcustom".
+                var parts = architectureString.ToUpper().Split('_');
+                var basicDescription = parts[0];
+
+                if(!basicDescription.StartsWith("RV"))
+                {
+                    throw new ConstructionException($"Architecture string should start with rv, but is: {architectureString}");
+                }
+
+                var bits = string.Join("", basicDescription.Skip(2).TakeWhile(Char.IsDigit));
+                if(bits.Length == 0 || int.Parse(bits) != parent.MostSignificantBit + 1)
+                {
+                    throw new ConstructionException($"Unexpected architecture width: {bits}");
+                }
 
                 //The architecture name is: RV{architecture_width}{list of letters denoting instruction sets}
-                foreach(var @set in parts[0].Skip(2).SkipWhile(x => Char.IsDigit(x)))
+                foreach(var @set in basicDescription.Skip(2 + bits.Length))
                 {
                     switch(set)
                     {
@@ -906,25 +951,44 @@ namespace Antmicro.Renode.Peripherals.CPU
                         case 'B': instructionSets.Add(InstructionSet.B); break;
                         case 'G': instructionSets.Add(InstructionSet.G); break;
                         default:
-                            parent.Log(LogLevel.Warning, $"Undefined instruction set: {set}.");
-                            break;
+                            throw new ConstructionException($"Undefined instruction set: {set}.");
                     }
                 }
 
-                // We skip the first element because it contains extensions processed earlier and added to `instructionSets` list
-                foreach(var @set in parts.Skip(1))
+                // skip the basic description
+                foreach(var extension in parts.Skip(1))
                 {
-                    switch(set)
+                    // standard extension
+                    if(extension.StartsWith("Z"))
                     {
-                        case "BA": standardExtensions.Add(StandardInstructionSetExtensions.BA); break;
-                        case "BB": standardExtensions.Add(StandardInstructionSetExtensions.BB); break;
-                        case "BC": standardExtensions.Add(StandardInstructionSetExtensions.BC); break;
-                        case "BS": standardExtensions.Add(StandardInstructionSetExtensions.BS); break;
-                        case "ICSR": standardExtensions.Add(StandardInstructionSetExtensions.ICSR); break;
-                        case "IFENCEI": standardExtensions.Add(StandardInstructionSetExtensions.IFENCEI); break;
-                        default:
-                            parent.Log(LogLevel.Warning, $"Undefined instruction set extension: {set}.");
-                            break;
+                        var set = extension.Substring(1);
+                        switch(set)
+                        {
+                            case "BA": standardExtensions.Add(StandardInstructionSetExtensions.BA); break;
+                            case "BB": standardExtensions.Add(StandardInstructionSetExtensions.BB); break;
+                            case "BC": standardExtensions.Add(StandardInstructionSetExtensions.BC); break;
+                            case "BS": standardExtensions.Add(StandardInstructionSetExtensions.BS); break;
+                            case "ICSR": standardExtensions.Add(StandardInstructionSetExtensions.ICSR); break;
+                            case "IFENCEI": standardExtensions.Add(StandardInstructionSetExtensions.IFENCEI); break;
+                            case "FH": standardExtensions.Add(StandardInstructionSetExtensions.ZFH); break;
+                            default:
+                                throw new ConstructionException($"Undefined instruction set standard extension: {set}.");
+                        }
+                    }
+                    // custom extesions
+                    else if(extension.StartsWith("X"))
+                    {
+                        switch(extension.Substring(1))
+                        {
+                            case "ANDES": Andes_AndeStarV5Extension.RegisterIn(machine, (RiscV32)parent); break;
+                            default:
+                                throw new ConstructionException($"Unsupported custom instruction set extension: {extension}.");
+                        }
+                    }
+                    // unexpected value
+                    else
+                    {
+                        throw new ConstructionException($"Undefined instruction set extension: {extension}.");
                     }
                 }
             }
@@ -932,6 +996,7 @@ namespace Antmicro.Renode.Peripherals.CPU
             private IList<StandardInstructionSetExtensions> standardExtensions;
             private readonly IList<InstructionSet> instructionSets;
             private readonly BaseRiscV parent;
+            private readonly IMachine machine;
         }
 
         private RegisterValue HandleMTVEC_STVECWrite(RegisterValue value, string registerName)
@@ -994,6 +1059,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         // but because these additional features are not there RISCV_ADDITIONAL_FEATURE_OFFSET allows to show that they are unrelated to MISA.
         private const int AdditionalExtensionOffset = 26;
 
+        private const ulong DefaultResetVector = 0x1000;
         private const int NumberOfGeneralPurposeRegisters = 32;
 
         protected enum IrqType

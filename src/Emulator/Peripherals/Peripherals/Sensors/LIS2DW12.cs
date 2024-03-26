@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -87,7 +87,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
         {
             if(type == RESDType.MultiFrequency)
             {
-                FeedMultiFrequencyAccelerationSamplesFromRESD(path);
+                FeedMultiFrequencyAccelerationSamplesFromRESD(path, startTime);
                 return;
             }
             else if(type != RESDType.Normal)
@@ -106,6 +106,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
 
         public void FeedAccelerationSample(string path)
         {
+            accelerationFifo.KeepFifoOnReset = true;
             accelerationFifo.FeedSamplesFromFile(path);
             UpdateInterrupts();
         }
@@ -277,7 +278,8 @@ namespace Antmicro.Renode.Peripherals.Sensors
         public GPIO Interrupt1 { get; }
         public GPIO Interrupt2 { get; }
         public ByteRegisterCollection RegistersCollection { get; }
-        public uint SampleRate {
+        public uint SampleRate
+        {
             get => sampleRate;
             private set
             {
@@ -286,43 +288,90 @@ namespace Antmicro.Renode.Peripherals.Sensors
                 {
                     feederThread.Frequency = sampleRate;
                 }
+                this.Log(LogLevel.Debug, "Sampling rate set to {0}", SampleRate);
                 SampleRateChanged?.Invoke(value);
             }
         }
 
-        private void FeedMultiFrequencyAccelerationSamplesFromRESD(string path)
+        private void FeedMultiFrequencyAccelerationSamplesFromRESD(string path, ulong startTime)
         {
             var parser = new LowLevelRESDParser(path);
             var mapping = parser.GetDataBlockEnumerator<AccelerationSample>()
                 .OfType<ConstantFrequencySamplesDataBlock<AccelerationSample>>()
-                .Select(block => new { Channel = block.ChannelId, block.Frequency, block.StartTime })
+                .Select(block => new { Channel = block.ChannelId, block.Frequency, block.StartTime, block.SamplesCount })
                 .ToList();
 
-            // We keep the index of the last block used so far so that we can skip already
-            // used blocks on each sample rate change.
-            var index = 0;
+            // Count samples in blocks with numbers between blockFirst and blockLast (both exclusive)
+            Func<int, int, ulong> countSkippedSamples = (blockFirst, blockLast) =>
+            {
+                var skippedSamples = mapping.Skip(blockFirst).Take(blockLast - blockFirst - 1)
+                    .Aggregate(0UL, (samplesCount, block) => samplesCount + block.SamplesCount);
+                return skippedSamples;
+            };
+
+            // Keep track of additional statistics for improved logging
+            var previousBlockNumber = 0;
+            var numberOfSampleInBlock = 0ul;
+            var samplesInBlock = 0ul;
+            var repeatCounter = 0ul;
+            var prevSampleRate = 0u;
+            var afterSampleRateChange = false;
+            var previousRESDStreamStatus = RESDStreamStatus.BeforeStream;
+
+            Action<ulong> resetCurrentBlockStats = (samplesCnt) =>
+            {
+                samplesInBlock = samplesCnt;
+                numberOfSampleInBlock = 0;
+                repeatCounter = 0;
+            };
+
+            // We keep the number of the last block used so far so that we can skip already used blocks on each event
+            var blockNumber = 0;
+            var init = true;
             Action<uint> findAndActivate = null;
             findAndActivate = (sampleRate) =>
             {
+                if(sampleRate != prevSampleRate)
+                {
+                    afterSampleRateChange = true;
+                }
+                else if(afterSampleRateChange)
+                {
+                    if(fifoModeSelection.Value == FIFOModeSelection.FIFOMode)
+                    {
+                        // FIFO mode entered after changing sample rate. Repeat the previous block to synchronize with FIFO operation.
+                        blockNumber = previousBlockNumber;
+                    }
+                    afterSampleRateChange = false;
+                }
+                previousBlockNumber = blockNumber;
                 var currentEntry = mapping
                     .Select((item, i) => new { Item = item, Index = i })
-                    .Skip(index)
+                    .Skip(blockNumber)
                     .FirstOrDefault(o => o.Item.Frequency == sampleRate);
 
                 if(currentEntry == null)
                 {
-                    // No more blocks at this sample rate, so restore the FIFO-preserving behavior
-                    accelerationFifo.KeepFifoOnReset = true;
+                    // No more blocks at this sample rate
+                    this.Log(LogLevel.Debug, "No more blocks for the sample rate {0}Hz in the RESD file", sampleRate);
+                    feederThread?.Stop();
+                    feederThread = null;
+                    resdStream?.Dispose();
                     // If there are no more blocks, even without taking the sample rate
                     // into account, then we can unregister this sample rate change handler
-                    if(index == mapping.Count)
+                    if(blockNumber == mapping.Count)
                     {
+                        this.Log(LogLevel.Debug, "No more blocks in the RESD file");
                         SampleRateChanged -= findAndActivate;
+                        FIFOModeEntered -= findAndActivate;
                     }
                     return;
                 }
 
-                index = currentEntry.Index + 1;
+                blockNumber = currentEntry.Index + 1;
+                var samplesSkippedInLastBlock = previousRESDStreamStatus == RESDStreamStatus.OK ? samplesInBlock - numberOfSampleInBlock : 0;
+                this.Log(LogLevel.Noisy, "Skipped {0} blocks while moving from the RESD block with the number {1} to {2}. Skipped {3} samples from the last active block and {4} samples in total",
+                    blockNumber - previousBlockNumber - 1, previousBlockNumber, blockNumber, samplesSkippedInLastBlock, samplesSkippedInLastBlock + countSkippedSamples(previousBlockNumber, blockNumber));
                 var block = currentEntry.Item;
 
                 feederThread?.Stop();
@@ -339,34 +388,74 @@ namespace Antmicro.Renode.Peripherals.Sensors
                     path,
                     block.Channel,
                     RESDStreamSampleOffset.Specified,
-                    (long)machine.ClockSource.CurrentValue.TotalMicroseconds * -1000L + (long)block.StartTime,
+                    (long)machine.ClockSource.CurrentValue.TotalMicroseconds * -1000L + (long)block.StartTime - (init ? (long)startTime : 0),
                     b => (b as ConstantFrequencySamplesDataBlock<AccelerationSample>)?.Frequency == sampleRate
                 );
+                resdStream.Owner = null; // turn off verbose internal RESD logging and use custom logs
                 accelerationFifo.KeepFifoOnReset = false;
+                resetCurrentBlockStats(block.SamplesCount);
+                previousRESDStreamStatus = RESDStreamStatus.BeforeStream;
 
                 // We start the thread with shouldStop: false so that it will keep feeding the last
                 // sample into the FIFO at the specified frequency until it's stopped after a sample
                 // rate switch
                 AccelerationSample previousSample = null;
+                // The same indexing as in 'ResdCommand' is used to log block's number
+                this.Log(LogLevel.Noisy, "New RESD stream for the sample rate {0}Hz with the first block with the number {1} delayed by {2}ns", sampleRate, blockNumber, init ? (long)startTime : 0);
                 feederThread = resdStream.StartSampleFeedThread(this, sampleRate, (sample, ts, status) =>
                 {
-                    if(status == RESDStreamStatus.OK)
+                    switch(status)
                     {
-                        previousSample = sample;
+                        case RESDStreamStatus.OK:
+                        {
+                            if(blockNumber < resdStream.CurrentBlockNumber)
+                            {
+                                // We received the first sample from the next block in the RESD stream 
+                                // as a result of internal RESD operation, not due to a triggered event
+                                if(fifoModeSelection.Value == FIFOModeSelection.FIFOMode)
+                                {
+                                    // In FIFO mode we don't allow automatic passtrough to the next block,
+                                    // because it would interfere with event driven FIFOModeEntered logic.
+                                    goto case RESDStreamStatus.BeforeStream;
+                                }
+                                resetCurrentBlockStats(resdStream.CurrentBlock.SamplesCount);
+                                blockNumber = (int)resdStream.CurrentBlockNumber;
+                                this.Log(LogLevel.Noisy, "Beginning of the new RESD block ({0}Hz) with the number {1}", sampleRate, blockNumber);
+                            }
+
+                            numberOfSampleInBlock++;
+                            previousSample = sample;
+                            this.Log(LogLevel.Noisy, "Fed current sample from the RESD block ({0}Hz) with the number {1}: {2} at {3} ({4}/{5})", sampleRate, blockNumber, previousSample, ts, numberOfSampleInBlock, samplesInBlock);
+                            break;
+                        }
+                        case RESDStreamStatus.BeforeStream:
+                        {
+                            repeatCounter++;
+                            this.Log(LogLevel.Noisy, "Repeated the last sample from the previous RESD block ({0}Hz) with the number {1}: {2} at {3} - {4} times", sampleRate, blockNumber, previousSample, ts, repeatCounter);
+                            break;
+                        }
+                        case RESDStreamStatus.AfterStream:
+                        {
+                            repeatCounter++;
+                            this.Log(LogLevel.Noisy, "No more samples in the RESD stream for the sample rate {0}Hz. Repeated the last sample from the previous RESD block with the number {1}: {2} at {3} - {4} times", sampleRate, blockNumber, previousSample, ts, repeatCounter);
+                            break;
+                        }
                     }
-                    else if(status == RESDStreamStatus.AfterStream && index == mapping.Count)
-                    {
-                        feederThread = null;
-                    }
+                    previousRESDStreamStatus = status;
+
                     if(previousSample != null)
                     {
                         HandleAccelerationSample(previousSample, ts);
                     }
-                }, shouldStop: false);
+                }, startTime: init ? startTime : 0, shouldStop: false);
+
+                init = false;
+                prevSampleRate = sampleRate;
             };
 
             findAndActivate(SampleRate);
             SampleRateChanged += findAndActivate;
+            FIFOModeEntered += findAndActivate;
         }
 
         private void FeedAccelerationSampleInner(decimal x, decimal y, decimal z, bool keepOnReset, uint repeat = 1)
@@ -400,12 +489,12 @@ namespace Antmicro.Renode.Peripherals.Sensors
 
         private void LoadNextSample()
         {
-            this.Log(LogLevel.Noisy, "Acquiring next sample");
             if(fifoModeSelection.Value != FIFOModeSelection.Bypass || accelerationFifo.KeepFifoOnReset)
             {
                 accelerationFifo.TryDequeueNewSample();
                 CurrentSample = accelerationFifo.Sample;
             }
+            this.Log(LogLevel.Noisy, "Acquired sample {0} during {1} operation", CurrentSample, fifoModeSelection.Value);
             UpdateInterrupts();
         }
 
@@ -459,7 +548,6 @@ namespace Antmicro.Renode.Peripherals.Sensors
                                 SampleRate = 0;
                                 break;
                         }
-                        this.Log(LogLevel.Noisy, "Sampling rate set to {0}", SampleRate);
                     }, name: "Output data rate and mode selection (ODR)");
 
             Registers.Control2.Define(this, 0x4)
@@ -565,6 +653,12 @@ namespace Antmicro.Renode.Peripherals.Sensors
                         if(newMode == FIFOModeSelection.Bypass)
                         {
                             accelerationFifo.Reset();
+                        }
+                    }, changeCallback: (oldMode, newMode) =>
+                    {
+                        if(oldMode == FIFOModeSelection.Bypass && newMode == FIFOModeSelection.FIFOMode)
+                        {
+                            FIFOModeEntered?.Invoke(SampleRate);
                         }
                     }, name: "FIFO mode selection bits (FMode)");
 
@@ -875,6 +969,8 @@ namespace Antmicro.Renode.Peripherals.Sensors
         private RESDStream<AccelerationSample> resdStream;
 
         private event Action<uint> SampleRateChanged;
+        // This event is used in MultiFrequency RESD to precisely match RESD behavior with FIFO operation
+        private event Action<uint> FIFOModeEntered;
 
         private decimal temperature;
 
@@ -950,7 +1046,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
                         owner.Log(LogLevel.Noisy, "{0}: Fifo filled up. Dumping the oldest sample.", name);
                         queue.TryDequeue<Vector3DSample>(out _);
                     }
-
+                    owner.Log(LogLevel.Noisy, "Enqueued sample {0} at index {1}", sample, queue.Count);
                     queue.Enqueue(sample);
                 }
             }

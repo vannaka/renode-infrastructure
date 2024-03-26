@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -18,7 +18,7 @@ namespace Antmicro.Renode.Peripherals.CRC
     {
         public STM32F4_CRC(IMachine machine) : base(machine)
         {
-            crc = new CRCEngine(CRCPolynomial.CRC32, init: 0xFFFFFFFF, xorOutput: 0xFFFFFFFF);
+            crc = new CRCEngine(CRCPolynomial.CRC32, init: 0xFFFFFFFF, xorOutput: 0, reflectInput: false, reflectOutput: false);
 
             DefineRegisters();
             Reset();

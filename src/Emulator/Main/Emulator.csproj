@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
@@ -7,14 +7,14 @@
     <OutputType>Library</OutputType>
     <RootNamespace>Antmicro.Renode</RootNamespace>
     <AssemblyName>Emulator</AssemblyName>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.6.2</TargetFrameworkVersion>
     <ProductVersion>8.0.30703</ProductVersion>
     <SchemaVersion>2.0</SchemaVersion>
     <PropertiesLocation>..\..\..\..\..\output\properties.csproj</PropertiesLocation>
   </PropertyGroup>
   <Import Project="$(PropertiesLocation)" />
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <LangVersion>7</LangVersion>
+    <LangVersion>7.2</LangVersion>
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
@@ -26,7 +26,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <LangVersion>7</LangVersion>
+    <LangVersion>7.2</LangVersion>
     <DebugType>none</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release</OutputPath>
@@ -297,6 +297,7 @@
     </Compile>
     <Compile Include="Utilities\IAutoLoadType.cs" />
     <Compile Include="Peripherals\CPU\ICPU.cs" />
+    <Compile Include="Peripherals\CPU\ICPUWithAArch64Support.cs" />
     <Compile Include="Peripherals\CPU\ICPUWithMetrics.cs" />
     <Compile Include="Peripherals\CPU\ICPUWithNMI.cs" />
     <Compile Include="Peripherals\CPU\ICPUWithExternalMmu.cs" />
@@ -350,7 +351,6 @@
     <Compile Include="Peripherals\GPIOPort\BaseGPIOPort.cs" />
     <Compile Include="Peripherals\Bus\AllowedTranslation.cs" />
     <Compile Include="Peripherals\Bus\AllowedTranslationsAttribute.cs" />
-    <Compile Include="Peripherals\EndianessAttribute.cs" />
     <Compile Include="Core\GPIOConnection.cs" />
     <Compile Include="Peripherals\BackendManager.cs" />
     <Compile Include="Peripherals\Video\IVideo.cs" />
@@ -403,6 +403,7 @@
     <Compile Include="Core\Structure\Registers\Tag.cs" />
     <Compile Include="Utilities\EnumConverter.cs" />
     <Compile Include="Core\Structure\Registers\PeripheralRegister.cs" />
+    <Compile Include="Core\Structure\Registers\RegisterSelector.cs" />
     <Compile Include="Core\SyncUnitPolicy.cs" />
     <Compile Include="Time\RealTimeClockMode.cs" />
     <Compile Include="Foreign\RecordEntryBase.cs" />
@@ -523,6 +524,7 @@
     <Compile Include="Utilities\GDB\Packet.cs" />
     <Compile Include="Utilities\GDB\PacketBuilder.cs" />
     <Compile Include="Utilities\GDB\PacketData.cs" />
+    <Compile Include="Utilities\GDB\PacketThreadId.cs" />
     <Compile Include="Utilities\GDB\GdbStub.cs" />
     <Compile Include="Peripherals\CPU\ICpuSupportingGdb.cs" />
     <Compile Include="Peripherals\CPU\ICPUWithMMU.cs" />
@@ -593,11 +595,21 @@
     <Compile Include="Utilities\ICanLoadFiles.cs" />
     <Compile Include="Peripherals\Network\Clause45Address.cs" />
     <Compile Include="Network\CRCMode.cs" />
+    <Compile Include="Network\BasicNetwork.cs" />
+    <Compile Include="Network\IBasicNetworkNode.cs" />
     <Compile Include="Utilities\IfWrapper.cs" />
     <Compile Include="Peripherals\IMachine.cs" />
     <Compile Include="Utilities\RESD\LowLevelRESDParser.cs" />
     <Compile Include="Utilities\RESD\RESDAttribute.cs" />
     <Compile Include="Core\IGPIOWithHooks.cs" />
+    <Compile Include="Utilities\Collections\PriorityQueue.cs" />
+    <Compile Include="Peripherals\UART\VirtualConsole.cs" />
+    <Compile Include="Utilities\SimpleInstructionDecoder.cs" />
+    <Compile Include="Peripherals\DefaultInterruptAttribute.cs" />
+    <Compile Include="Peripherals\CPU\CPUState.cs" />
+    <Compile Include="Peripherals\IEndiannessAware.cs" />
+    <Compile Include="Utilities\SnapshotTracker.cs" />
+    <Compile Include="Core\Structure\IBusRegistration.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildBinPath)\Microsoft.CSharp.targets" />
   <ItemGroup />

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -177,6 +177,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         {
             isAborted = false;
             Pause();
+            State = CPUState.InReset;
         }
 
         public virtual void SyncTime()
@@ -259,6 +260,23 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        /// <remarks><c>StateChanged</c> is invoked when the value gets changed.</remarks>
+        public CPUState State
+        {
+            get => state;
+
+            private set
+            {
+                var oldState = state;
+                if(oldState == value)
+                {
+                    return;
+                }
+                state = value;
+                StateChanged?.Invoke(this, oldState, value);
+            }
+        }
+
         public TimeHandle TimeHandle
         {
             get
@@ -306,7 +324,9 @@ namespace Antmicro.Renode.Peripherals.CPU
         }
 
         public event Action<HaltArguments> Halted;
-        public event Action<BaseCPU> WaitingForInterrupt;
+
+        /// <remarks>The arguments passed are: <c>StateChanged(cpu, oldState, newState)</c>.</remarks>
+        public event Action<ICPU, CPUState, CPUState> StateChanged;
 
         public abstract ulong ExecutedInstructions { get; }
         public abstract RegisterValue PC { get; set; }
@@ -538,10 +558,18 @@ restart:
                 return CpuResult.NothingExecuted;
             }
 
+            if(State != CPUState.Running)
+            {
+                // Here we know for sure that the machine has been started and the CPU isn't halted.
+                // Currently, the state can be Aborted, InReset and Running so stepping etc. is ignored.
+                State = CPUState.Running;
+            }
+
             this.Trace($"CPU thread body running... granted {interval.Ticks} ticks");
             var mmuFaultThrown = false;
             var initialExecutedResiduum = executedResiduum;
             var initialTotalElapsedTime = TimeHandle.TotalElapsedTime;
+            TimeInterval virtualTimeAhead;
 
             var instructionsToExecuteThisRound = interval.ToCPUCycles(PerformanceInMips, out ulong ticksResiduum);
             if(instructionsToExecuteThisRound <= executedResiduum)
@@ -576,6 +604,9 @@ restart:
                     // call SyncTime during ExecuteInstructions
                 }
 
+                // set upper limit on instructions to execute to `int.MaxValue` 
+                // as otherwise it would overflow further down in ExecuteInstructions
+                toExecute = Math.Min(toExecute, int.MaxValue);
                 var result = ExecutionResult.Ok;
                 if(toExecute > 0)
                 {
@@ -593,22 +624,18 @@ restart:
 
                 if(result == ExecutionResult.WaitingForInterrupt)
                 {
-                    WaitingForInterrupt?.Invoke(this);
-
                     if(!InDebugMode && !neverWaitForInterrupt)
                     {
                         this.Trace();
                         var instructionsToSkip = Math.Min(InstructionsToNearestLimit(), instructionsLeftThisRound);
 
-                        if(!machine.LocalTimeSource.AdvanceImmediately)
+                        virtualTimeAhead = machine.LocalTimeSource.ElapsedVirtualHostTimeDifference;
+                        if(!machine.LocalTimeSource.AdvanceImmediately && virtualTimeAhead.Ticks > 0)
                         {
-                            var intervalToSleep = TimeInterval.FromCPUCycles(instructionsToSkip, PerformanceInMips, out var unused).ToTimeSpan();
-                            var interrupted = sleeper.Sleep(intervalToSleep, out var intervalSlept);
-
-                            if(interrupted)
-                            {
-                                instructionsToSkip = TimeInterval.FromTimeSpan(intervalSlept).ToCPUCycles(PerformanceInMips, out var _);
-                            }
+                            // Don't fall behind realtime by sleeping
+                            var intervalToSleep = TimeInterval.FromCPUCycles(instructionsToSkip, PerformanceInMips, out var cyclesResiduum).WithTicksMin(virtualTimeAhead.Ticks);
+                            sleeper.Sleep(intervalToSleep.ToTimeSpan(), out var intervalSlept);
+                            instructionsToSkip = TimeInterval.FromTimeSpan(intervalSlept).ToCPUCycles(PerformanceInMips, out var _) + cyclesResiduum;
                         }
 
                         ReportProgress(instructionsToSkip);
@@ -633,6 +660,18 @@ restart:
                 }
             }
 
+            // If AdvanceImmediately is not enabled, and virtual time has surpassed host time,
+            // sleep to make up the difference.
+            virtualTimeAhead = machine.LocalTimeSource.ElapsedVirtualHostTimeDifference;
+            if(!machine.LocalTimeSource.AdvanceImmediately && virtualTimeAhead.Ticks > 0)
+            {
+                // Ignore the return value, if the sleep is interrupted we'll make up any extra
+                // remaining difference next time. Preserve the interrupt request so that if this
+                // extra sleep is interrupted due to a CPU pause, it will be picked up by the WFI
+                // handling above.
+                sleeper.Sleep(virtualTimeAhead.ToTimeSpan(), out var _, preserveInterruptRequest: true);
+            }
+
             this.Trace("CPU thread body finished");
 
             if(isAborted)
@@ -640,6 +679,7 @@ restart:
                 this.Trace("aborted, reporting continue");
                 TimeHandle.ReportBackAndContinue(TimeInterval.Empty);
                 executedResiduum = 0;
+                State = CPUState.Aborted;
                 return CpuResult.Aborted;
             }
             else if(currentHaltedState)
@@ -831,6 +871,7 @@ restart:
         [Transient]
         private Thread cpuThread;
 
+        private CPUState state = CPUState.InReset;
         private TimeHandle timeHandle;
 
         private bool wasRunningWhenHalted;

@@ -1,22 +1,21 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
 //
 using System;
+using System.Linq;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Network;
 using Antmicro.Renode.Utilities;
-using Endianess = ELFSharp.ELF.Endianess;
 
 namespace Antmicro.Renode.Peripherals.Network
 {
-    [Endianess(Endianess.BigEndian)]
     public class GaislerEth : NetworkWithPHY, IDoubleWordPeripheral, IGaislerAPB, IMACInterface, IKnownSize
     {
         public GaislerEth(IMachine machine) : base(machine)
@@ -42,27 +41,27 @@ namespace Antmicro.Renode.Peripherals.Network
 
         public uint ReadDoubleWord(long offset)
         {
-            switch((Offset)offset)
+            switch((Registers)offset)
             {
-            case Offset.Control:
+            case Registers.Control:
                 return registers.Control;
-            case Offset.Status:
+            case Registers.Status:
                 return registers.Status;
-            case Offset.MacAddressHi:
+            case Registers.MacAddressHi:
                 //return registers.MacAddresHi;
                 return (uint)BitConverter.ToUInt16(MAC.Bytes, 4);
-            case Offset.MacAddressLo:
+            case Registers.MacAddressLo:
                 //return registers.MacAddresLo;
                 return BitConverter.ToUInt32(MAC.Bytes, 0);
-            case Offset.MDIOControlStatus:
+            case Registers.MDIOControlStatus:
                 return registers.MDIOControlStatus;
-            case Offset.TxDescriptorPointer:
+            case Registers.TxDescriptorPointer:
                 return registers.TxDescriptorPointer;
-            case Offset.RxDescriptorPointer:
+            case Registers.RxDescriptorPointer:
                 return registers.RxDescriptorPointer;
-            case Offset.HashTableHi:
+            case Registers.HashTableHi:
                 return registers.HashTableHi;
-            case Offset.HashTableLo:
+            case Registers.HashTableLo:
                 return registers.HashTableLo;
             default:
                 this.LogUnhandledRead(offset);
@@ -72,9 +71,9 @@ namespace Antmicro.Renode.Peripherals.Network
 
         public void WriteDoubleWord(long offset, uint value)
         {
-            switch((Offset)offset)
+            switch((Registers)offset)
             {
-            case Offset.Control:
+            case Registers.Control:
                 if(value == 0x40)
                 {
                     break;
@@ -85,17 +84,17 @@ namespace Antmicro.Renode.Peripherals.Network
                 }
                 registers.Control = value;
                 break;
-            case Offset.Status:
+            case Registers.Status:
                 //registers.Status = value;
                 registers.Status &= ~(value & 0xffu);
                 break;
-            case Offset.MacAddressHi:
+            case Registers.MacAddressHi:
                 registers.MacAddresHi = value;
                 break;
-            case Offset.MacAddressLo:
+            case Registers.MacAddressLo:
                 registers.MacAddresLo = value;
                 break;
-            case Offset.MDIOControlStatus:
+            case Registers.MDIOControlStatus:
 
                 var id = ((value >> 11) & 0x1f);
                 var reg = ((value >> 6) & 0x1f);
@@ -127,20 +126,20 @@ namespace Antmicro.Renode.Peripherals.Network
                     IRQ.Set();
                 }*/
                 break;
-            case Offset.TxDescriptorPointer:
+            case Registers.TxDescriptorPointer:
                 registers.TxDescriptorPointer = value;
                 transmitDescriptorBase = value & ~(0x3ffu);
                 transmitDescriptorOffset = value & 0x3ffu;
                 break;
-            case Offset.RxDescriptorPointer:
+            case Registers.RxDescriptorPointer:
                 registers.RxDescriptorPointer = value;
                 receiveDescriptorBase = value & ~(0x3ffu);
                 receiveDescriptorOffset = value & 0x3ffu;
                 break;
-            case Offset.HashTableHi:
+            case Registers.HashTableHi:
                 registers.HashTableHi = value;
                 break;
-            case Offset.HashTableLo:
+            case Registers.HashTableLo:
                 registers.HashTableLo = value;
                 break;
             default:
@@ -166,13 +165,7 @@ namespace Antmicro.Renode.Peripherals.Network
 
         public uint GetInterruptNumber()
         {
-            var irqEndpoints = IRQ.Endpoints;
-            if(irqEndpoints.Count > 0)
-            {
-                return (uint)irqEndpoints[0].Number;
-            }
-            return 0;
-
+            return this.GetCpuInterruptNumber(IRQ);
         }
 
         public GaislerAPBPlugAndPlayRecord.SpaceType GetSpaceType()
@@ -339,7 +332,7 @@ namespace Antmicro.Renode.Peripherals.Network
             public uint HashTableLo;
         }
 
-        private enum Offset : uint
+        private enum Registers : uint
         {
             Control = 0x00,
             Status = 0x04,
@@ -390,9 +383,6 @@ namespace Antmicro.Renode.Peripherals.Network
                 word0 = sbus.ReadDoubleWord(ramAddress);
                 word1 = sbus.ReadDoubleWord(ramAddress + 4);
 
-                word0 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word0);
-                word1 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word1);
-
                 AttemptLimitError = (word0 & (1u << 15)) != 0;
                 UnderrunError = (word0 & (1u << 14)) != 0;
                 InterruptEnable = (word0 & (1u << 13)) != 0;
@@ -409,9 +399,6 @@ namespace Antmicro.Renode.Peripherals.Network
                 word0 |= (Wrap ? 1u << 12 : 0) | (Enable ? 1u << 11 : 0) | (Length & 0x7ffu);
 
                 word1 = PacketAddress & ~(0x03u);
-
-                word0 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word0);
-                word1 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word1);
 
                 sbus.WriteDoubleWord(ramAddress, word0);
                 sbus.WriteDoubleWord(ramAddress + 4, word1);
@@ -449,9 +436,6 @@ namespace Antmicro.Renode.Peripherals.Network
                 word0 = sbus.ReadDoubleWord(ramAddress);
                 word1 = sbus.ReadDoubleWord(ramAddress + 4);
 
-                word0 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word0);
-                word1 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word1);
-
                 MulticastAddress = (word0 & (1u << 26)) != 0;
                 LengthError = (word0 & (1u << 18)) != 0;
                 OverrunError = (word0 & (1u << 17)) != 0;
@@ -473,9 +457,6 @@ namespace Antmicro.Renode.Peripherals.Network
                 word0 |= (InterruptEnable ? 1u << 13 : 0) | (Wrap ? 1u << 12 : 0) | (Enable ? 1u << 18 : 0) | (Length & (0x7ffu));
 
                 word1 = PacketAddress & ~(0x03u);
-
-                word0 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word0);
-                word1 = (uint)System.Net.IPAddress.HostToNetworkOrder((int)word1);
 
                 sbus.WriteDoubleWord(ramAddress, word0);
                 sbus.WriteDoubleWord(ramAddress + 4, word1);

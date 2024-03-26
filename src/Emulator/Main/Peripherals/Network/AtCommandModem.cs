@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -37,7 +37,7 @@ namespace Antmicro.Renode.Peripherals.Network
             lineBuffer = new StringBuilder();
         }
 
-        public void WriteChar(byte value)
+        public virtual void WriteChar(byte value)
         {
             if(!Enabled)
             {
@@ -87,7 +87,14 @@ namespace Antmicro.Renode.Peripherals.Network
                 var response = HandleCommand(command);
                 if(response != null)
                 {
-                    SendResponse(response);
+                    if(CommandResponseDelayMilliseconds.HasValue)
+                    {
+                        machine.ScheduleAction(TimeInterval.FromMilliseconds(CommandResponseDelayMilliseconds.Value), _ => SendResponse(response)); 
+                    }
+                    else
+                    {
+                        SendResponse(response);
+                    }
                 }
             }
             else
@@ -111,11 +118,17 @@ namespace Antmicro.Renode.Peripherals.Network
 
         public bool EchoEnabledAtReset { get; set; } = true;
 
+        public bool EchoEnabled => echoEnabled;
+
         public virtual uint BaudRate { get; protected set; } = 115200;
 
         public Bits StopBits => Bits.One;
 
         public Parity ParityBit => Parity.None;
+
+        public ulong? CommandResponseDelayMilliseconds { get; set; }
+
+        public uint? TransferBandwidth { get; set; }
 
         [field: Transient]
         public event Action<byte> CharReceived;
@@ -151,12 +164,35 @@ namespace Antmicro.Renode.Peripherals.Network
                 return;
             }
 
-            lock(uartWriteLock)
+            if(TransferBandwidth == null)
             {
-                foreach(var b in bytes)
+                lock(uartWriteLock)
                 {
-                    charReceived(b);
+                    foreach(var b in bytes)
+                    {
+                        charReceived(b);
+                    }
                 }
+            }
+            else
+            {
+                var currentByte = 0;
+                IManagedThread thread = null;
+                thread = machine.ObtainManagedThread(() =>
+                {
+                    lock(uartWriteLock)
+                    {
+                        var b = bytes[currentByte];
+                        currentByte++;
+                        charReceived(b);
+                    }
+
+                    if(currentByte == bytes.Length)
+                    {
+                        thread.Stop();
+                    }
+                }, TransferBandwidth.Value);
+                thread.Start();
             }
         }
 
@@ -256,7 +292,7 @@ namespace Antmicro.Renode.Peripherals.Network
             return method != null;
         }
 
-        private Response HandleCommand(string command)
+        protected virtual Response HandleCommand(string command)
         {
             if(commandOverrides.TryGetValue(command, out var overrideResp))
             {

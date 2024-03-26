@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -9,13 +9,11 @@ using System;
 using System.Collections.Generic;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Exceptions;
-using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals;
 using Antmicro.Renode.Utilities;
 using Antmicro.Renode.Utilities.Collections;
 using System.Linq;
 using System.Reflection;
-using System.Text;
 using System.Collections;
 using Microsoft.CSharp.RuntimeBinder;
 using AntShell.Commands;
@@ -23,7 +21,6 @@ using Dynamitey;
 using Antmicro.Renode.UserInterface.Tokenizer;
 using Antmicro.Renode.UserInterface.Commands;
 using Antmicro.Renode.UserInterface.Exceptions;
-using Antmicro.Renode.Core.Structure;
 using System.Runtime.InteropServices;
 using System.Globalization;
 
@@ -231,7 +228,16 @@ namespace Antmicro.Renode.UserInterface
 
         private const string DefaultNamespace = "Antmicro.Renode.Peripherals.";
 
-        private IEnumerable<String> GetDeviceSuggestions(string name)
+        private IEnumerable<String> GetObjectSuggestions(object node)
+        {
+            if(node != null)
+            {
+                return GetMonitorInfo(node.GetType()).AllNames;
+            }
+            return new List<String>();
+        }
+
+        private object GetDevice(string name)
         {
             var staticBound = FromStaticMapping(name);
             var iface = GetExternalInterfaceOrNull(name);
@@ -240,18 +246,17 @@ namespace Antmicro.Renode.UserInterface
                 var boundObject = staticBound ?? FromMapping(name) ?? iface;
                 if(boundObject != null)
                 {
-                    return GetMonitorInfo(boundObject.GetType()).AllNames;
+                    return boundObject; 
                 }
 
-                Type device;
+                IPeripheral device;
                 string longestMatch;
-                string actualName;
-                if(TryFindPeripheralTypeByName(name, out device, out longestMatch, out actualName))
+                if(TryFindPeripheralByName(name, out device, out longestMatch))
                 {
-                    return GetMonitorInfo(device).AllNames;
+                    return device;
                 }
             }
-            return new List<String>();
+            return null; 
         }
 
         private string GetResultFormat(object result, int num, int? width = null)
@@ -725,7 +730,7 @@ namespace Antmicro.Renode.UserInterface
                 writer.Write("get", ConsoleColor.Yellow);
                 writer.Write($": {name} fieldName\n\r - ");
                 writer.Write("set", ConsoleColor.Yellow);
-                writer.WriteLine($": {name} fieldName Value\n\r"); 
+                writer.WriteLine($": {name} fieldName Value\n\r");
             }
         }
 
@@ -1045,9 +1050,21 @@ namespace Antmicro.Renode.UserInterface
             { new Tuple<Type, Type>(typeof(short), typeof(DecimalIntegerToken)) },
         };
 
+        private bool TryParseTokenForParamType(Token token, Type type, out object result)
+        {
+            var tokenTypes = acceptableTokensTypes.Where(x => x.Item1 == type);
+            //If this result type is limited to specific token types, and this is not one of them, fail
+            if(tokenTypes.Any() && !tokenTypes.Any(tt => tt.Item2.IsInstanceOfType(token)))
+            {
+                result = null;
+                return false;
+            }
+            result = ConvertValue(token.GetObjectValue(), type);
+            return true;
+        }
+
         private bool TryPrepareParameters(IList<Token> values, IList<ParameterInfo> parameters, out List<object> result)
         {
-
             result = new List<object>();
             //this might be expanded - try all parameters with the attribute, try to fill from factory based on it's type
             if(parameters.Count > 0 && typeof(IMachine).IsAssignableFrom(parameters[0].ParameterType)
@@ -1066,44 +1083,88 @@ namespace Antmicro.Renode.UserInterface
                 paramArrayElementType = lastParam.ParameterType.GetElementType();
             }
 
+            var indexedValues = new Dictionary<int, Token>();
+            var allowPositional = true;
+            for(int i = 0, currentPos = 0; i < values.Count; ++i, ++currentPos)
+            {
+                //Parse named arguments
+                if(i < values.Count - 2
+                    && values[i] is LiteralToken lit
+                    && values[i + 1] is EqualityToken)
+                {
+                    var parameterIndex = parameters.IndexOf(p => p.Name == lit.Value);
+                    //Fail on nonexistent or duplicate names
+                    if(parameterIndex == -1 || indexedValues.ContainsKey(parameterIndex))
+                    {
+                        return false;
+                    }
+                    //Disallow further positional arguments only if the name doesn't match the position
+                    //For example, for f(a=0, b=0) `f a=4 9` is allowed, like in C#
+                    allowPositional &= parameterIndex == currentPos;
+                    indexedValues[parameterIndex] = values[i + 2];
+                    i += 2; //Skip the name and = sign
+                }
+                else
+                {
+                    //If we have filled all positional slots then allow further positional arguments
+                    //no matter what. This is used for a params T[] after named parameters
+                    if(!allowPositional && currentPos < parameters.Count)
+                    {
+                        return false;
+                    }
+                    indexedValues[currentPos] = values[i];
+                }
+            }
+
             //Too many arguments and no trailing params T[]
-            if(values.Count > parameters.Count && paramArrayElementType == null)
+            var valueCount = indexedValues.Count;
+            if(valueCount > parameters.Count && paramArrayElementType == null)
             {
                 return false;
+            }
+
+            //Grab all arguments that we can treat as positional off the front
+            values = new List<Token>(valueCount);
+            for(int i = 0; i < valueCount; ++i)
+            {
+                if(!indexedValues.TryGetValue(i, out var value))
+                {
+                    break;
+                }
+                indexedValues.Remove(i);
+                values.Add(value);
             }
 
             try
             {
                 int i;
-                //Convert all given parameters
+                //Convert all given positional parameters
                 for(i = 0; i < values.Count; ++i)
                 {
                     var paramType = parameters.ElementAtOrDefault(i)?.ParameterType ?? paramArrayElementType;
-                    var tokenTypes = acceptableTokensTypes.Where(x => x.Item1 == paramType).ToList();
-                    if(tokenTypes.Any())
+                    if(!TryParseTokenForParamType(values[i], paramType, out var parsed))
                     {
-                        var isOk = false;
-                        foreach(var tokenType in tokenTypes)
-                        {
-                            if(tokenType.Item2.IsInstanceOfType(values[i]))
-                            {
-                                isOk = true;
-                                break;
-                            }
-                        }
-                        if(!isOk)
-                        {
-                            return false;
-                        }
+                        return false;
                     }
-                    result.Add(ConvertValue(values[i].GetObjectValue(), paramType));
+                    result.Add(parsed);
                 }
-                //If not enough parameters, check for their default values
+                //If not enough parameters, check for default values and named parameters
                 if(i < parameters.Count)
                 {
                     for(; i < parameters.Count; ++i)
                     {
-                        if(parameters[i].IsOptional)
+                        //See if it was passed as a named parameter
+                        if(indexedValues.TryGetValue(i, out var value))
+                        {
+                            //This can technically be a params T[], but it's not worth handling since
+                            //it would only be possible to pass one value
+                            if(!TryParseTokenForParamType(value, parameters[i].ParameterType, out var parsed))
+                            {
+                                return false;
+                            }
+                            result.Add(parsed);
+                        }
+                        else if(parameters[i].IsOptional)
                         {
                             result.Add(parameters[i].DefaultValue);
                         }
@@ -1123,6 +1184,26 @@ namespace Antmicro.Renode.UserInterface
                 throw;
             }
             return true;
+        }
+
+        public object FindFieldOrProperty(object node, string name)
+        {
+            var type = node.GetType();
+            var fields = cache.Get(type, GetAvailableFields);
+            var properties = cache.Get(type, GetAvailableProperties);
+            var foundField = fields.FirstOrDefault(x => x.Name == name);
+            var foundProp = properties.FirstOrDefault(x => x.Name == name);
+
+            if(foundProp?.GetMethod != null)
+            {
+                return InvokeGet(node, foundProp);
+            }
+            if(foundField != null)
+            {
+                return InvokeGet(node, foundField);
+            }
+
+            return null;
         }
 
         public object ExecuteDeviceAction(string name, object device, IEnumerable<Token> p)
@@ -1229,7 +1310,7 @@ namespace Antmicro.Renode.UserInterface
                 {
                     var currentObject = InvokeGet(device, foundProp);
                     var objectFullName = $"{name} {commandValue}";
-                    return RecursiveExecuteDeviceAction(objectFullName, currentObject, p, 1); 
+                    return RecursiveExecuteDeviceAction(objectFullName, currentObject, p, 1);
                 }
                 else if(setValue != null && foundProp.IsCurrentlySettable(CurrentBindingFlags))
                 {
@@ -1340,7 +1421,7 @@ namespace Antmicro.Renode.UserInterface
             {
                 return null;
             }
-            return ExecuteDeviceAction(name, currentObject, p.Skip(tokensToSkip)); 
+            return ExecuteDeviceAction(name, currentObject, p.Skip(tokensToSkip));
         }
 
         IEnumerable<PropertyInfo> GetAvailableIndexers(Type objectType)

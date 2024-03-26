@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2023 Western Digital Corporation
 //
 // This file is licensed under the MIT License.
@@ -48,7 +48,7 @@ namespace Antmicro.Renode.Core
         void InitAtomicMemoryState();
         bool IsRegistered(IPeripheral peripheral);
         IManagedThread ObtainManagedThread(Action action, uint frequency, string name = "managed thread", IEmulationElement owner = null, Func<bool> stopCondition = null);
-        IDisposable ObtainPausedState();
+        IDisposable ObtainPausedState(bool internalPause = false);
         void Pause();
         void PauseAndRequestEmulationPause(bool precise = false);
         void PlayFrom(ReadFilePath fileName);
@@ -93,6 +93,7 @@ namespace Antmicro.Renode.Core
         DateTime RealTimeClockDateTime { get; }
         RealTimeClockMode RealTimeClockMode { get; set; }
         DateTime RealTimeClockStart { get; }
+        bool InternalPause { get; }
 
         event Action<IMachine> MachineReset;
         event Action<IMachine, PeripheralsChangedEventArgs> PeripheralsChanged;

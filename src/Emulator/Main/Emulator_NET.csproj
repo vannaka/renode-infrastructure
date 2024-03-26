@@ -6,6 +6,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>Emulator</AssemblyName>
     <PropertiesLocation>..\..\..\..\..\output\properties.csproj</PropertiesLocation>
+    <LangVersion>7.2</LangVersion>
   </PropertyGroup>
   <Import Project="$(PropertiesLocation)" />
   <PropertyGroup Condition=" $(GUI_DISABLED) == 'true' ">
@@ -20,7 +21,7 @@
     <PackageReference Include="Dynamitey" Version="2.0.10.189" />
     <PackageReference Include="Mono.Cecil" Version="0.11.3" />
     <PackageReference Include="IronPython" Version="2.7.11" />
-    <PackageReference Include="System.Drawing.Common" Version="5.0.2" />
+    <PackageReference Include="System.Drawing.Common" Version="5.0.3" />
     <PackageReference Include="Microsoft.CodeAnalysis.Compilers" Version="3.9.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="3.9.0" />
     <Reference Include="Mono.CSharp">

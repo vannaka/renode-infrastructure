@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2022 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -127,13 +127,19 @@ namespace Antmicro.Renode.Core
                     {
                         try
                         {
+                            CurrentEmulation.SnapshotTracker.Save(CurrentEmulation.MasterTimeSource.ElapsedVirtualTime, path);
                             serializer.Serialize(VersionString, stream);
                             serializer.Serialize(CurrentEmulation, stream);
                             CurrentEmulation.BlobManager.Save(stream);
                         }
                         catch(InvalidOperationException e)
                         {
-                            throw new RecoverableException(string.Format("Error encountered during saving: {0}.", e.Message));
+                            var message = string.Format("Error encountered during saving: {0}", e.Message);
+                            if(e is NonSerializableTypeException && serializer.Settings.SerializationMethod == Migrant.Customization.Method.Generated)
+                            {
+                                message += "\nHint: Set 'serialization-mode = Reflection' in the Renode config file for detailed information.";
+                            }
+                            throw new RecoverableException(message);
                         }
                     }
                 }
@@ -211,6 +217,43 @@ namespace Antmicro.Renode.Core
                         entryAssembly.GetName().Name,
                         entryAssembly.GetName().Version,
                         ((AssemblyInformationalVersionAttribute)entryAssembly.GetCustomAttributes(typeof(AssemblyInformationalVersionAttribute), false)[0]).InformationalVersion
+                    );
+                }
+                catch(System.Exception)
+                {
+                    return string.Empty;
+                }
+
+            }
+        }
+        public string LongVersionString
+        {
+            get
+            {
+                var entryAssembly = Assembly.GetEntryAssembly();
+                if(entryAssembly == null)
+                {
+                    // When running from NUnit in MonoDevelop entryAssembly is null, but we don't care
+                    return string.Empty;
+                }
+
+                try
+                {
+
+#if NET
+                    var runtime = ".NET";
+#elif PLATFORM_WINDOWS
+                    var runtime = ".NET Framework";
+#else
+                    var runtime = "Mono";
+#endif
+                    return string.Format("{0} v{1}\n  build: {2}\n  build type: {3}\n  runtime: {4} {5}",
+                        entryAssembly.GetName().Name,
+                        entryAssembly.GetName().Version,
+                        ((AssemblyInformationalVersionAttribute)entryAssembly.GetCustomAttributes(typeof(AssemblyInformationalVersionAttribute), false)[0]).InformationalVersion,
+                        ((AssemblyConfigurationAttribute)entryAssembly.GetCustomAttributes(typeof(AssemblyConfigurationAttribute), false)[0]).Configuration,
+                        runtime,
+                        Environment.Version
                     );
                 }
                 catch(System.Exception)

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -414,6 +414,13 @@ namespace Antmicro.Renode.Utilities
             return -1;
         }
 
+#if !NET
+        public static TSource MinBy<TSource, T>(this IEnumerable<TSource> source, Func<TSource, T> map) where T: IComparable<T>
+        {
+            return source.Aggregate((a, b) => map(a).CompareTo(map(b)) < 0 ? a : b);
+        }
+#endif
+
         public static string Stringify<TSource>(this IEnumerable<TSource> source, string separator = " ", int limitPerLine = 0)
         {
             return Stringify(source.Select(x => x == null ? String.Empty : x.ToString()), separator, limitPerLine);
@@ -463,6 +470,11 @@ namespace Antmicro.Renode.Utilities
             }
             Buffer.BlockCopy(byteArray, 0, outArray, 0, byteLength);
             return true;
+        }
+
+        public static IEnumerable<int> ConcatRangeFromTo(this IEnumerable<int> enumerable, int start, int stopIncluded)
+        {
+            return enumerable.Concat(Enumerable.Range(start, stopIncluded - start + 1));
         }
 
         // MoreLINQ - Extensions to LINQ to Objects
@@ -685,6 +697,11 @@ namespace Antmicro.Renode.Utilities
             }
 
             directory = null;
+            if(baseDirectory.Length == 0)
+            {
+                return false;
+            }
+
             var currentDirectory = new DirectoryInfo(baseDirectory);
             while(currentDirectory != null)
             {
@@ -1219,6 +1236,11 @@ namespace Antmicro.Renode.Utilities
             return PrettyPrintCollection(collection, x => "0x{0:X}".FormatWith(x));
         }
 
+        public static LazyHexString<T> ToLazyHexString<T>(this IEnumerable<T> collection)
+        {
+            return new LazyHexString<T>(collection);
+        }
+
         public static UInt32 ToUInt32Smart(this byte[] @this)
         {
             if(@this.Length > 4)
@@ -1628,6 +1650,15 @@ namespace Antmicro.Renode.Utilities
             }
         }
 
+#if !NET
+        // Enumerable.TakeLast is in the standard library on .NET Core but isn't available on .NET Framework
+        public static IEnumerable<T> TakeLast<T>(this IEnumerable<T> @this, int count)
+        {
+            // This will enumerate the collection twice - it might be not optimal for performance sensitive operations
+            return @this.Skip(Math.Max(0, @this.Count() - count));
+        }
+#endif
+
         public static ulong CastToULong(dynamic number)
         {
             if(new Type[] { typeof(byte), typeof(ushort), typeof(uint), typeof(ulong)}.Any((t) => number.GetType() == t))
@@ -1635,6 +1666,22 @@ namespace Antmicro.Renode.Utilities
                 return (ulong)number;
             }
             throw new ArgumentException($"Can't cast {number.GetType()} to ulong", "number");
+        }
+
+        public static IEnumerable<T> Prefix<T>(IEnumerable<T> enumerable, Func<T, T, T> function)
+        {
+            var enumerator = enumerable.GetEnumerator();
+            // Using `out var` here causes a compiler crash in Mono 6.8.0.105+dfsg-3.3 from Debian
+            if(!enumerator.TryGetNext(out T prefix))
+            {
+                yield break;
+            }
+            while(enumerator.MoveNext())
+            {
+                yield return prefix;
+                prefix = function(prefix, enumerator.Current);
+            }
+            yield return prefix;
         }
 
         public static DateTime UnixEpoch = new DateTime(1970, 1, 1);
@@ -1650,6 +1697,21 @@ namespace Antmicro.Renode.Utilities
 
         public MethodInfo Method { get; }
         public T Attribute { get; }
+    }
+
+    public class LazyHexString<T>
+    {
+        public LazyHexString(IEnumerable<T> collection)
+        {
+            this.collection = collection;
+        }
+
+        public override string ToString()
+        {
+            return Misc.PrettyPrintCollectionHex(collection);
+        }
+
+        private readonly IEnumerable<T> collection;
     }
 }
 

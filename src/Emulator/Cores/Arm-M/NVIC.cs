@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2024 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 // Copyright (c) 2020-2021 Microsoft
 //
@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Antmicro.Renode.Core;
+using Antmicro.Renode.Core.Structure.Registers;
+using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.CPU;
@@ -42,14 +44,25 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
                     SetPendingIRQ(15);
                 }
             };
+            RegisterCollection = new DoubleWordRegisterCollection(this);
+            DefineRegisters();
             Reset();
         }
 
         public void AttachCPU(CortexM cpu)
         {
+            if(this.cpu != null)
+            {
+                throw new RecoverableException("The NVIC has already attached CPU.");
+            }
             this.cpu = cpu;
             this.cpuId = cpu.ID;
             mpuVersion = cpu.IsV8 ? MPUVersion.PMSAv8 : MPUVersion.PMSAv7;
+
+            if(cpu.Model == "cortex-m7")
+            {
+                DefineTightlyCoupledMemoryControlRegisters();
+            }
         }
 
         public bool MaskedInterruptPresent { get { return maskedInterruptPresent; } }
@@ -174,9 +187,6 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
             case Registers.SystemHandlerPriority2:
             case Registers.SystemHandlerPriority3:
                 return HandlePriorityRead(offset - 0xD14, false);
-            case Registers.SystemHandlerControlAndState:
-                this.DebugLog("Read from SHCS register. This is not yet implemented. Returning 0");
-                return 0;
             case Registers.ApplicationInterruptAndReset:
                 return HandleApplicationInterruptAndResetRead();
             case Registers.ConfigurableFaultStatus:
@@ -186,8 +196,7 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
             case Registers.MemoryFaultAddress:
                 return cpu.MemoryFaultAddress;
             default:
-                this.LogUnhandledRead(offset);
-                return 0;
+                return RegisterCollection.Read(offset);
             }
         }
 
@@ -325,9 +334,6 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
                 priorities[15] = (byte)(value >> 24);
                 this.DebugLog("Priority of IRQs 14, 15 set to 0x{0:X}, 0x{1:X} respectively.", (byte)(value >> 16), (byte)(value >> 24));
                 break;
-            case Registers.SystemHandlerControlAndState:
-                this.DebugLog("Write to SHCS register. This is not yet implemented. Value written was 0x{0:X}.", value);
-                break;
             case Registers.CoprocessorAccessControl:
                 // for ARM v8 and CP10 values:
                 //      0b11 Full access to the FP Extension and MVE
@@ -349,7 +355,7 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
                     cpu.FpuEnabled = false;
                 }
                 break;
-            case Registers.SoftwareTriggerInterruptRegister:
+            case Registers.SoftwareTriggerInterrupt:
                 // This register is implemented only in ARMv7m and ARMv8m
                 if(cpu.Model == "cortex-m3" || cpu.Model == "cortex-m4" || cpu.Model == "cortex-m4f" || cpu.Model == "cortex-m7")
                 {
@@ -390,13 +396,14 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
                 ccr = value;
                 break;
             default:
-                this.LogUnhandledWrite(offset, value);
+                RegisterCollection.Write(offset, value);
                 break;
             }
         }
 
         public void Reset()
         {
+            RegisterCollection.Reset();
             InitInterrupts();
             for(var i = 0; i < priorities.Length; i++)
             {
@@ -524,6 +531,62 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
             {
                 cpu.SetSevOnPending(value);
             }
+        }
+
+        public DoubleWordRegisterCollection RegisterCollection { get; }
+
+        private void DefineRegisters()
+        {
+            Registers.SystemHandlerControlAndState.Define(RegisterCollection)
+                .WithTaggedFlag("MEMFAULTACT (Memory Manage Active)", 0)
+                .WithTaggedFlag("BUSFAULTACT (Bus Fault Active)", 1)
+                .WithReservedBits(2, 1)
+                .WithTaggedFlag("USGFAULTACT (Usage Fault Active)", 3)
+                .WithReservedBits(4, 3)
+                .WithTaggedFlag("SVCALLACT (SV Call Active)", 7)
+                .WithTaggedFlag("MONITORACT (Monitor Active)", 8)
+                .WithReservedBits(9, 1)
+                .WithTaggedFlag("PENDSVACT (Pend SV Active)", 10)
+                .WithTaggedFlag("SYSTICKACT (Sys Tick Active)", 11)
+                .WithTaggedFlag("USGFAULTPENDED (Usage Fault Pending)", 12)
+                .WithTaggedFlag("MEMFAULTPENDED (Mem Manage Pending)", 13)
+                .WithTaggedFlag("BUSFAULTPENDED (Bus Fault Pending)", 14)
+                .WithTaggedFlag("SVCALLPENDED (SV Call Pending)", 15)
+                // The enable flags only store written data.
+                // Changing them doesn't change a behavior of the model.
+                .WithFlag(16, name: "MEMFAULTENA (Memory Manage Fault Enable)") 
+                .WithFlag(17, name: "BUSFAULTENA (Bus Fault Enable)") 
+                .WithFlag(18, name: "USGFAULTENA (Usage Fault Enable)") 
+                .WithReservedBits(19, 13)
+                .WithChangeCallback((_, val) =>
+                    this.Log(LogLevel.Warning, "Changing value of the SHCSR register to 0x{0:X}, the register isn't supported by Renode", val)
+                );
+
+            Registers.CacheSizeSelection.Define(RegisterCollection)
+                .WithTaggedFlag("InD (Instruction or Data Selection)", 0)
+                .WithTag("Level", 1, 3)
+                .WithReservedBits(4, 28);
+
+            Registers.CacheSizeID.Define(RegisterCollection)
+                .WithTag("LineSize", 0, 3)
+                .WithTag("Associativity", 3, 10)
+                .WithTag("NumSets", 13, 15)
+                .WithTaggedFlag("WA (Write Allocation Support)", 28)
+                .WithTaggedFlag("RA (Read Allocation Support)", 29)
+                .WithTaggedFlag("WB (Write Back Support)", 30)
+                .WithTaggedFlag("WT (Write Through Support)", 31);
+        }
+
+        private void DefineTightlyCoupledMemoryControlRegisters()
+        {
+            // The ITCMC and DTCMC registers have same fields.
+            Registers.InstructionTightlyCoupledMemoryControl.DefineMany(RegisterCollection, 2, setup: (reg, index) => reg
+                .WithTaggedFlag("EN (TCM Enable)", 0)
+                .WithTaggedFlag("RMW (Read Modify Write Enable)", 1)
+                .WithTaggedFlag("RETEN (Retry Phase Enable)", 2)
+                .WithTag("SZ (TCM Size)", 3, 4)
+                .WithReservedBits(7, 25)
+            );
         }
 
         private void InitInterrupts()
@@ -992,23 +1055,77 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
             CPUID = 0xD00,
             InterruptControlState = 0xD04,
             VectorTableOffset = 0xD08,
-            SystemControlRegister = 0xD10,
-            ConfigurationAndControl = 0xD14,
             ApplicationInterruptAndReset = 0xD0C,
-            SystemHandlerPriority1 = 0xD18,
-            SystemHandlerPriority2 = 0xD1C,
-            SystemHandlerPriority3 = 0xD20,
-            SystemHandlerControlAndState = 0xD24,
-            ConfigurableFaultStatus = 0xD28,
-            HardFaultStatus = 0xD2C,
-            DebugFaultStatus = 0xD30,
+            SystemControlRegister = 0xD10, // SCR
+            ConfigurationAndControl = 0xD14, // CCR
+            SystemHandlerPriority1 = 0xD18, // SHPR1
+            SystemHandlerPriority2 = 0xD1C, // SHPR2
+            SystemHandlerPriority3 = 0xD20, // SHPR3
+            SystemHandlerControlAndState = 0xD24, // SHCSR
+            ConfigurableFaultStatus = 0xD28, // CFSR
+            HardFaultStatus = 0xD2C, // HFSR
+            DebugFaultStatus = 0xD30, // DFSR
             // FPU registers 0xD88 .. F3C
-            MemoryFaultAddress = 0xD34,
-            CoprocessorAccessControl = 0xD88,
-            SoftwareTriggerInterruptRegister = 0xF00,
-            FPContextControl = 0xF34,
-            FPContextAddress = 0xF38,
-            FPDefaultStatusControl = 0xF3C,
+            MemoryFaultAddress = 0xD34, // MMFAR
+            BusFaultAddress = 0xD38, // BFAR
+            AuxiliaryFaultStatus = 0xD3C, // AFSR
+            ProcessorFeature0 = 0xD40, // ID_PFR0
+            ProcessorFeature1 = 0xD44, // ID_PFR1
+            DebugFeature0 = 0xD48, // ID_DFR0
+            AuxiliaryFeature0 = 0xD4C, // ID_AFR0
+            MemoryModelFeature0 = 0xD50, // ID_MMFR0
+            MemoryModelFeature1 = 0xD54, // ID_MMFR1
+            MemoryModelFeature2 = 0xD58, // ID_MMFR2
+            MemoryModelFeature3 = 0xD5C, // ID_MMFR3
+            InstructionSetAttribute0 = 0xD60, // ID_ISAR0
+            InstructionSetAttribute1 = 0xD64, // ID_ISAR1
+            InstructionSetAttribute2 = 0xD68, // ID_ISAR2
+            InstructionSetAttribute3 = 0xD6C, // ID_ISAR3
+            InstructionSetAttribute4 = 0xD70, // ID_ISAR4
+            ID_ISAR5 = 0xD74, // ID_ISAR5
+            CacheLevelID = 0xD78, // CLIDR
+            CacheType = 0xD7C, // CTR
+            CacheSizeID = 0xD80, // CCSIDR
+            CacheSizeSelection = 0xD84, // CSSELR
+            CoprocessorAccessControl = 0xD88, // CPACR
+            MPUType = 0xD90, // MPU_TYPE
+            MPUControl = 0xD94, // MPU_CTRL
+            MPURegionNumber = 0xD98, // MPU_RNR
+            MPURegionBaseAddress = 0xD9C, // MPU_RBAR
+            MPURegionAttributeAndSize = 0xDA0, // MPU_RASR
+            Alias1OfMPURegionBaseAddress = 0xDA4, // MPU_RBAR_A1
+            Alias1OfMPURegionAttributeAndSize = 0xDA8, // MPU_RASR_A1
+            Alias2OfMPURegionBaseAddress = 0xDAC, // MPU_RBAR_A2
+            Alias2OfMPURegionAttributeAndSize = 0xDB0, // MPU_RASR_A2
+            Alias3OfMPURegionBaseAddress = 0xDB4, // MPU_RBAR_A3
+            Alias3OfMPURegionAttributeAndSize = 0xDB8, // MPU_RASR_A3
+            SoftwareTriggerInterrupt = 0xF00, // STIR
+            FPContextControl = 0xF34, // FPCCR
+            FPContextAddress = 0xF38, // FPCAR
+            FPDefaultStatusControl = 0xF3C, // FPDSCR
+            FloatingPointDefaultStatusControl = 0xF3C, // FPDSCR
+            MediaAndFPFeature0 = 0xF40, // MVFR0
+            MediaAndFPFeature1 = 0xF44, // MVFR1
+            MediaAndFPFeature2 = 0xF48, // MVFR2
+            ICacheInvalidateAllToPoUaIgnored = 0xF50, // ICIALLU 
+            ICacheInvalidateByMVAToPoUaAddress = 0xF58, // ICIMVAU 
+            DCacheInvalidateByMVAToPoCAddress = 0xF5C, // DCIMVAC 
+            DCacheInvalidateBySetWay= 0xF60, // DCISW 
+            DCacheCleanByMVAToPoUAddress = 0xF64, // DCCMVAU 
+            DCacheCleanByMVAToPoCAddress = 0xF68, // DCCMVAC 
+            DCacheCleanBySetWay= 0xF6C, // DCCSW 
+            DCacheCleanAndInvalidateByMVAToPoCAddress = 0xF70, // DCCIMVAC 
+            DCacheCleanAndInvalidateBySetWay= 0xF74, // DCCISW 
+            BranchPredictorInvalidateAllIgnored = 0xF78, // BPIALL 
+
+            // Registers with addresses from 0xF90 to 0xFCF are implementation defined.
+            // The following ones are valid for Cortex-M7.
+            InstructionTightlyCoupledMemoryControl = 0xF90, // ITCMCR 
+            DataTightlyCoupledMemoryControl = 0xF94, // DTCMCR 
+            AHBPControl = 0xF98, // AHBPCR 
+            L1CacheControl = 0xF9C, // CACR 
+            AHBSlaveControl = 0xFA0, // AHBSCR 
+            AuxiliaryBusFaultStatus = 0xFA8, // ABFSR 
         }
 
         private enum RegistersV7
