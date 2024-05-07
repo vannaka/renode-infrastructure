@@ -398,6 +398,16 @@ namespace Antmicro.Renode.Utilities
             return beginnings.Select((x, i) => endings[i] == x ? x.ToString() : string.Format("{0}-{1}", x, endings[i])).Stringify(", ");
         }
 
+        public static void ForeachBit(ulong reg, Action<byte, bool> action, byte? bitCount = null)
+        {
+            // Iterate bitCount times or all bits in ulong
+            byte iterations = bitCount ?? sizeof(ulong) * 8;
+            for(byte i = 0; i < iterations; i++)
+            {
+                action(i, IsBitSet(reg, i));
+            }
+        }
+
         public static void ForeachActiveBit(ulong reg, Action<byte> action)
         {
             byte pos = 0;
@@ -445,6 +455,16 @@ namespace Antmicro.Renode.Utilities
         public static bool[] GetBits(uint reg)
         {
             return GetBitsInner(reg, 32);
+        }
+
+        public static bool[] GetBits(ushort reg)
+        {
+            return GetBitsInner(reg, 16);
+        }
+
+        public static bool[] GetBits(byte reg)
+        {
+            return GetBitsInner(reg, 8);
         }
 
         public static byte[] GetNibbles(ulong reg)
@@ -668,6 +688,12 @@ namespace Antmicro.Renode.Utilities
         public static ulong ReverseBytes(ulong v)
         {
             return ((ulong)ReverseBytes((uint)v) << 32) | ReverseBytes((uint)(v >> 32));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static uint ReverseWords(uint v)
+        {
+            return (v << 16) | (v >> 16);
         }
 
         public static int CalculateBytesCount(int bitsCount)

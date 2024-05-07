@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
 using Antmicro.Renode.Utilities;
@@ -46,12 +47,17 @@ namespace Antmicro.Renode.Peripherals.Bus
         IBusRegistered<IBusPeripheral> WhatIsAt(ulong address, ICPU context = null);
         IPeripheral WhatPeripheralIsAt(ulong address, ICPU context = null);
 
+        /// <returns>True if any part of the <c>range</c> is locked.</returns>
+        bool IsAddressRangeLocked(Range range);
+        void SetAddressRangeLocked(Range range, bool locked);
+
         void SetPeripheralEnabled(IPeripheral peripheral, bool value);
         bool IsPeripheralEnabled(IPeripheral peripheral);
 
         IEnumerable<ICPU> GetCPUs();
         int GetCPUId(ICPU cpu);
         ICPU GetCurrentCPU();
+        IEnumerable<IBusRegistered<IBusPeripheral>> GetRegisteredPeripherals(ICPU context = null);
         bool TryGetCurrentCPU(out ICPU cpu);
 
         void UnregisterFromAddress(ulong address, ICPU context = null);
@@ -66,9 +72,9 @@ namespace Antmicro.Renode.Peripherals.Bus
         void SetHookBeforePeripheralWrite<T>(IBusPeripheral peripheral, Func<T, long, T> hook, Range? subrange = null);
         void ClearHookAfterPeripheralRead<T>(IBusPeripheral peripheral);
 
-        string FindSymbolAt(ulong offset);
-        ulong GetSymbolAddress(string symbolName);
-        bool TryFindSymbolAt(ulong offset, out string name, out Symbol symbol);
+        string FindSymbolAt(ulong offset, ICPU context = null);
+        ulong GetSymbolAddress(string symbolName, ICPU context = null);
+        bool TryFindSymbolAt(ulong offset, out string name, out Symbol symbol, ICPU context = null);
         string DecorateWithCPUNameAndPC(string str);
 
         void MapMemory(IMappedSegment segment, IBusPeripheral owner, bool relative = true, ICPUWithMappedMemory context = null);
@@ -81,13 +87,13 @@ namespace Antmicro.Renode.Peripherals.Bus
         void LoadUImage(ReadFilePath fileName, IInitableCPU cpu = null);
         void LoadELF(ReadFilePath fileName, bool useVirtualAddress = false, bool allowLoadsOnlyToMemory = true, IInitableCPU cpu = null);
 
+        SymbolLookup GetLookup(ICPU context = null);
+
         IMachine Machine { get; }
 
         bool IsMultiCore { get; }
 
         Endianess Endianess { get; }
-
-        SymbolLookup Lookup { get; }
     }
 
     public static class BusControllerExtensions
@@ -100,6 +106,18 @@ namespace Antmicro.Renode.Peripherals.Bus
         public static void DisablePeripheral(this IBusController bus, IPeripheral peripheral)
         {
             bus.SetPeripheralEnabled(peripheral, false);
+        }
+
+        public static void MoveBusMultiRegistrationWithinContext(this IBusController bus, IBusPeripheral peripheral, ulong newAddress, ICPU cpu, string regionName)
+        {
+            bus.MoveRegistrationWithinContext(peripheral, newAddress, cpu,
+                selector: busRegisteredEnumerable =>
+                {
+                    return busRegisteredEnumerable.Where(
+                            busRegistered => (busRegistered.RegistrationPoint is BusMultiRegistration multiRegistration) && multiRegistration.ConnectionRegionName == regionName
+                        ).Single();
+                }
+            );
         }
 
         public static void ZeroRange(this IBusController bus, long from, long size, ICPU context = null)

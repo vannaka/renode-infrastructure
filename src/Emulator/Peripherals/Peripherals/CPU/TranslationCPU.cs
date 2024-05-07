@@ -60,6 +60,7 @@ namespace Antmicro.Renode.Peripherals.CPU
             : base(id, cpuType, machine, endianness, bitness)
         {
             this.translationCacheSize = DefaultTranslationCacheSize;
+            atomicId = -1;
             translationCacheSync = new object();
             pauseGuard = new CpuThreadPauseGuard(this);
             decodedIrqs = new Dictionary<Interrupt, HashSet<int>>();
@@ -131,15 +132,29 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
-        public int CyclesPerInstruction
+        /// <summary>
+        /// The value is used to convert instructions count to cycles, e.g.:
+        /// * for RISC-V CYCLE and MCYCLE CSRs
+        /// * in ARM Performance Monitoring Unit
+        /// </summary>
+        public decimal CyclesPerInstruction
         {
             get
             {
-                return checked((int)TlibGetCyclesPerInstruction());
+                return checked(TlibGetMillicyclesPerInstruction() / 1000m);
             }
             set
             {
-                TlibSetCyclesPerInstruction(checked((uint)value));
+                if(value <= 0)
+                {
+                    throw new RecoverableException("Value must be a positive number.");
+                }
+                var millicycles = value * 1000m;
+                if(millicycles % 1m != 0)
+                {
+                    throw new RecoverableException("Value's precision can't be greater than 0.001");
+                }
+                TlibSetMillicyclesPerInstruction(checked((uint)millicycles));
             }
         }
 
@@ -304,6 +319,12 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        protected override void OnLeavingResetState()
+        {
+            base.OnLeavingResetState();
+            TlibOnLeavingResetState();
+        }
+
         protected override void RequestPause()
         {
             base.RequestPause();
@@ -324,7 +345,6 @@ namespace Antmicro.Renode.Peripherals.CPU
         {
             base.Reset();
             isInterruptLoggingEnabled = false;
-            HandleRamSetup();
             TlibReset();
             ResetOpcodesCounters();
             profiler?.Dispose();
@@ -391,11 +411,35 @@ namespace Antmicro.Renode.Peripherals.CPU
             using(machine?.ObtainPausedState(true))
             {
                 currentMappings.Add(new SegmentMapping(segment));
-                RegisterMemoryChecked(segment.StartingOffset, segment.Size);
+                mappedMemory.Add(segment.GetRange());
+                SetAccessMethod(segment.GetRange(), true);
                 checked
                 {
                     TranslationCacheSize += segment.Size / 4;
                 }
+            }
+            this.NoisyLog("Registered memory at 0x{0:X}, size 0x{1:X}.", segment.StartingOffset, segment.Size);
+        }
+
+        public void SetMappedMemoryEnabled(Range range, bool enabled)
+        {
+            using(machine?.ObtainPausedState(true))
+            {
+                // Check if anything needs to be changed.
+                if(enabled ? !disabledMemory.ContainsOverlappingRange(range) : disabledMemory.ContainsWholeRange(range))
+                {
+                    return;
+                }
+
+                if(enabled)
+                {
+                    disabledMemory.Remove(range);
+                }
+                else
+                {
+                    disabledMemory.Add(range);
+                }
+                SetAccessMethod(range, asMemory: enabled);
             }
         }
 
@@ -403,21 +447,18 @@ namespace Antmicro.Renode.Peripherals.CPU
         {
             using(machine?.ObtainPausedState(true))
             {
-                var startAddress = range.StartAddress;
-                var endAddress = range.EndAddress - 1;
-                ValidateMemoryRangeAndThrow(startAddress, range.Size);
-
-                // when unmapping memory, two things has to be done
+                // when unmapping memory, two things have to be done
                 // first is to flag address range as no-memory (that is, I/O)
-                TlibUnmapRange(startAddress, endAddress);
+                SetAccessMethod(range, asMemory: false);
 
-                // and second is to remove mappings that are not used anymore
+                // remove mappings that are not used anymore
                 currentMappings = currentMappings.
                     Where(x => TlibIsRangeMapped(x.Segment.StartingOffset, x.Segment.StartingOffset + x.Segment.Size) == 1).ToList();
                 checked
                 {
                     TranslationCacheSize -= range.Size / 4;
                 }
+                mappedMemory.Remove(range);
                 RebuildMemoryMappings();
             }
         }
@@ -461,7 +502,7 @@ namespace Antmicro.Renode.Peripherals.CPU
 
             SetInternalHookAtBlockBegin((pc, size) =>
             {
-                if(Bus.TryFindSymbolAt(pc, out var name, out var symbol))
+                if(Bus.TryFindSymbolAt(pc, out var name, out var symbol, this))
                 {
                     if(removeDuplicates && symbol == previousSymbol)
                     {
@@ -879,24 +920,36 @@ namespace Antmicro.Renode.Peripherals.CPU
             return AssertMmuEnabledAndWindowInRange(index) ? TlibGetWindowPrivileges(index) : 0;
         }
 
-        private void RegisterMemoryChecked(ulong offset, ulong size)
+        private void SetAccessMethod(Range range, bool asMemory)
         {
-            checked
+            using(machine?.ObtainPausedState(true))
             {
-                ValidateMemoryRangeAndThrow(offset, size);
-                TlibMapRange(offset, size);
-                this.NoisyLog("Registered memory at 0x{0:X}, size 0x{1:X}.", offset, size);
+                ValidateMemoryRangeAndThrow(range);
+                if(asMemory)
+                {
+                    if(!mappedMemory.ContainsWholeRange(range))
+                    {
+                        throw new RecoverableException(
+                            $"Tried to set access as memory at {range} which isn't mapped memory in CPU: {this.GetName()}"
+                        );
+                    }
+                    TlibMapRange(range.StartAddress, range.Size);
+                }
+                else
+                {
+                    TlibUnmapRange(range.StartAddress, range.EndAddress);
+                }
             }
         }
 
-        private void ValidateMemoryRangeAndThrow(ulong startAddress, ulong size)
+        private void ValidateMemoryRangeAndThrow(Range range)
         {
             var pageSize = TlibGetPageSize();
-            if((startAddress % pageSize) != 0)
+            if((range.StartAddress % pageSize) != 0)
             {
                 throw new RecoverableException("Memory offset has to be aligned to guest page size.");
             }
-            if(size % pageSize != 0)
+            if(range.Size % pageSize != 0)
             {
                 throw new RecoverableException("Memory size has to be aligned to guest page size.");
             }
@@ -937,6 +990,12 @@ namespace Antmicro.Renode.Peripherals.CPU
             {
                 return Slot > 0;
             }
+        }
+
+        [Export]
+        private uint IsMemoryDisabled(ulong start, ulong size)
+        {
+            return disabledMemory.ContainsOverlappingRange(start.By(size)) ? 1u : 0u;
         }
 
         /// <remarks>
@@ -1046,7 +1105,7 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         private void OnTranslationBlockFetch(ulong offset)
         {
-            var info = Bus.FindSymbolAt(offset);
+            var info = Bus.FindSymbolAt(offset, this);
             if(info != string.Empty)
             {
                 info = " - " + info;
@@ -1068,9 +1127,10 @@ namespace Antmicro.Renode.Peripherals.CPU
         {
             foreach(var mapping in currentMappings)
             {
-                checked
+                var range = mapping.Segment.GetRange();
+                if(!disabledMemory.ContainsOverlappingRange(range))
                 {
-                    RegisterMemoryChecked(mapping.Segment.StartingOffset, mapping.Segment.Size);
+                    SetAccessMethod(range, asMemory: true);
                 }
             }
         }
@@ -1242,7 +1302,11 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
             if(machine != null)
             {
-                TlibAtomicMemoryStateInit(checked((int)this.Id), machine.AtomicMemoryStatePointer);
+                atomicId = TlibAtomicMemoryStateInit(machine.AtomicMemoryStatePointer, atomicId);
+                if(atomicId == -1)
+                {
+                    throw new ConstructionException("Failed to initialize atomic state, see the log for details");
+                }
             }
             HandleRamSetup();
             foreach(var hook in hooks)
@@ -1273,6 +1337,12 @@ namespace Antmicro.Renode.Peripherals.CPU
         [Transient]
         private ActionUInt64 onTranslationBlockFetch;
         private byte[] cpuState;
+
+        /// <summary>
+        /// <see cref="atomicId" /> acts as a binder between the CPU and atomic state.
+        /// It's used to restore the atomic state after deserialization
+        /// </summary>
+        private int atomicId;
         
         [Transient]
         private string libraryFile;
@@ -1404,6 +1474,8 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         private List<SegmentMapping> currentMappings;
 
+        private readonly MinimalRangesCollection disabledMemory = new MinimalRangesCollection();
+        private readonly MinimalRangesCollection mappedMemory = new MinimalRangesCollection();
         private readonly CpuThreadPauseGuard pauseGuard;
 
         [Transient]
@@ -1767,7 +1839,7 @@ namespace Antmicro.Renode.Peripherals.CPU
         protected Action TlibSetReturnRequest;
 
         [Import]
-        private ActionInt32IntPtr TlibAtomicMemoryStateInit;
+        private FuncInt32IntPtrInt32 TlibAtomicMemoryStateInit;
 
         [Import]
         private FuncUInt32 TlibGetPageSize;
@@ -1827,10 +1899,10 @@ namespace Antmicro.Renode.Peripherals.CPU
         private FuncUInt32 TlibGetMaximumBlockSize;
 
         [Import]
-        private ActionUInt32 TlibSetCyclesPerInstruction;
+        private ActionUInt32 TlibSetMillicyclesPerInstruction;
 
         [Import]
-        private FuncUInt32 TlibGetCyclesPerInstruction;
+        private FuncUInt32 TlibGetMillicyclesPerInstruction;
 
         [Import]
         private FuncInt32 TlibRestoreContext;
@@ -1925,6 +1997,9 @@ namespace Antmicro.Renode.Peripherals.CPU
         [Import]
         private ActionInt32 TlibSetBroadcastDirty;
 
+        [Import]
+        private Action TlibOnLeavingResetState;
+
 #pragma warning restore 649
 
         protected const int DefaultTranslationCacheSize = 32 * 1024 * 1024;
@@ -1948,7 +2023,7 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
 
             var phy = TranslateAddress(pc, MpuAccess.InstructionFetch);
-            var symbol = Bus.FindSymbolAt(pc);
+            var symbol = Bus.FindSymbolAt(pc, this);
             var tab = Bus.ReadBytes(phy, (int)size, true, context: this);
             Disassembler.DisassembleBlock(pc, tab, flags, out var disas);
 
@@ -1983,10 +2058,14 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        /// <summary>
+        /// This function returns <see cref="CPUCore.Id" /> instead of <see cref="Slot" />, since <see cref="Slot" /> is assigned at platform creation time.
+        /// It's usually not what is needed to identify a core in multi-processing context - instead `cpuId` (passed in CPU constructor) is used.
+        /// </summary>
         [Export]
-        private int GetCpuIndex()
+        private uint GetMpIndex()
         {
-            return Slot;
+            return Id;
         }
 
         public string DisassembleBlock(ulong addr = ulong.MaxValue, uint blockSize = 40, uint flags = 0)
@@ -2132,6 +2211,17 @@ namespace Antmicro.Renode.Peripherals.CPU
                 DeactivateHooks(PC);
                 return true;
             }
+            else if(result == ExecutionResult.StoppedAtWatchpoint)
+            {
+                this.Trace();
+                // If we stopped at a watchpoint we must've been in the process
+                // of executing an instruction which accesses memory.
+                // That means that if there have been any hooks added for the current PC,
+                // they were already executed, and the PC has been moved back by one instruction.
+                // We don't want to execute them again, so we disable them temporarily.
+                DeactivateHooks(PC);
+                return true;
+            }
             else if(result == ExecutionResult.WaitingForInterrupt)
             {
                 if(InDebugMode || neverWaitForInterrupt)
@@ -2226,6 +2316,8 @@ namespace Antmicro.Renode.Peripherals.CPU
                     return ExecutionResult.StoppedAtBreakpoint;
 
                 case TlibExecutionResult.StoppedAtWatchpoint:
+                    return ExecutionResult.StoppedAtWatchpoint;
+
                 case TlibExecutionResult.ReturnRequested:
                     return ExecutionResult.Interrupted;
 

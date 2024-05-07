@@ -16,9 +16,9 @@ using Antmicro.Renode.Utilities;
 
 namespace Antmicro.Renode.Peripherals.I2C
 {
-    public class RenesasDA14_I2C : SimpleContainer<II2CPeripheral>, IDoubleWordPeripheral, IProvidesRegisterCollection<DoubleWordRegisterCollection>, IKnownSize
+    public class RenesasDA_I2C : SimpleContainer<II2CPeripheral>, IDoubleWordPeripheral, IProvidesRegisterCollection<DoubleWordRegisterCollection>, IKnownSize
     {
-        public RenesasDA14_I2C(IMachine machine) : base(machine)
+        public RenesasDA_I2C(IMachine machine) : base(machine)
         {
             txFifo = new Queue<byte>();
             transmission = new Queue<byte>();
@@ -513,7 +513,7 @@ namespace Antmicro.Renode.Peripherals.I2C
                 .WithFlag(0, out controllerEnabled, name: "I2C_EN")
                 .WithFlag(1, name: "I2C_ABORT",
                     valueProviderCallback: _ => false,
-                    writeCallback: (value, _) => { if(value && controllerEnabled.Value) AbortTransmisson(); }
+                    writeCallback: (_, value) => { if(value && controllerEnabled.Value) AbortTransmission(); }
                 )
                 .WithFlag(2, out txBlocked, name: "I2C_TX_CMD_BLOCK",
                     changeCallback: (_, __) =>
@@ -700,7 +700,7 @@ namespace Antmicro.Renode.Peripherals.I2C
             IRQ.Set(irq);
         }
 
-        private void AbortTransmisson()
+        private void AbortTransmission()
         {
             txFifo.Clear();
             txAbort.Value = true;

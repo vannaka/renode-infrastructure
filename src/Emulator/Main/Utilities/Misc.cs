@@ -549,6 +549,20 @@ namespace Antmicro.Renode.Utilities
             }
         }
 
+        public static TValue GetOrDefault<TKey, TValue>(this IReadOnlyDictionary<TKey, TValue> @this, TKey key)
+        {
+            return @this.GetOrDefault(key, default(TValue));
+        }
+
+        public static TValue GetOrDefault<TKey, TValue>(this IReadOnlyDictionary<TKey, TValue> @this, TKey key, TValue defaultValue)
+        {
+            if(@this.TryGetValue(key, out var value))
+            {
+                return value;
+            }
+            return defaultValue;
+        }
+
         public static byte HiByte(this UInt16 value)
         {
             return (byte)((value >> 8) & 0xFF);
@@ -989,14 +1003,21 @@ namespace Antmicro.Renode.Utilities
             arr[id2] = tmp;
         }
 
-        public static bool EndiannessSwapInPlace(byte[] input, int width)
+        public static bool EndiannessSwapInPlace(byte[] input, int width, int offset = 0, int? length = null)
         {
-            if(input.Length % width != 0)
+            if(offset > input.Length)
             {
                 return false;
             }
 
-            for(var i = 0; i < input.Length; i += width)
+            var bytesFromOffset = input.Length - offset;
+            var len = length ?? bytesFromOffset;
+            if(len > bytesFromOffset || len % width != 0)
+            {
+                return false;
+            }
+
+            for(var i = offset; i < offset + len; i += width)
             {
                 for(var j = 0; j < width / 2; j++)
                 {
@@ -1496,6 +1517,17 @@ namespace Antmicro.Renode.Utilities
             }
         }
 
+        public static T[] CopyAndResize<T>(this T[] source, int length)
+        {
+            if(source.Length == length)
+            {
+                return source.ToArray();
+            }
+            var data = new T[length];
+            Array.Copy(source, data, Math.Min(source.Length, length));
+            return data;
+        }
+
         public static int CountTrailingZeroes(uint value)
         {
             int count = 0;
@@ -1656,6 +1688,25 @@ namespace Antmicro.Renode.Utilities
         {
             // This will enumerate the collection twice - it might be not optimal for performance sensitive operations
             return @this.Skip(Math.Max(0, @this.Count() - count));
+        }
+
+        public static IEnumerable<T[]> Chunk<T>(this IEnumerable<T> @this, int size)
+        {
+            var buffer = new Queue<T>();
+            foreach(var item in @this)
+            {
+                buffer.Enqueue(item);
+                if(buffer.Count == size)
+                {
+                    yield return buffer.ToArray();
+                    buffer.Clear();
+                }
+            }
+
+            if(buffer.Count > 0)
+            {
+                yield return buffer.ToArray();
+            }
         }
 #endif
 
