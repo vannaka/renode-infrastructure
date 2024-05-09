@@ -1604,17 +1604,16 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
             {
                 writeCallback = (irq, val) =>
                 {
-                    irq.State.TriggerType = (InterruptTriggerType)((uint)val & 0b10);   // Lower bit is reserved. Mask it out.
-                    // New logic makes it imposible to set bad trigger type.
-                    // if(val != InterruptTriggerType.LevelSensitive && val != InterruptTriggerType.EdgeTriggered)
-                    // {
-                    //     this.Log(LogLevel.Error, "Setting an unknown interrupt trigger type, value {0}", val);
-                    // }
+                    irq.State.TriggerType = val;
+                    if(val != InterruptTriggerType.LevelSensitive && val != InterruptTriggerType.EdgeTriggered)
+                    {
+                        this.Log(LogLevel.Error, "Setting an unknown interrupt trigger type, value {0}", val);
+                    }
                 };
             }
             return BuildInterruptEnumRegisters<InterruptTriggerType>(startId, endId, name, 16,
                 writeCallback: writeCallback,
-                valueProviderCallback: irq => (InterruptTriggerType)((uint)irq.State.TriggerType & 0b01 ) // Lower bit always reads 1.
+                valueProviderCallback: irq => irq.State.TriggerType
             );
         }
 
