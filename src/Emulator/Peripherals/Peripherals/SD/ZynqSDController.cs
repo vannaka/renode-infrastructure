@@ -241,10 +241,12 @@ namespace Antmicro.Renode.Peripherals.SD
                     if(curr)
                     {
                         irqManager.EnableInterrupt(irq, curr);
+                        this.InfoLog("Interrupt {0} enabled.", irq);
                     }
                     else
                     {
                         irqManager.DisableInterrupt(irq);
+                        this.InfoLog("Interrupt {0} disabled.", irq);
                     }
                 }))
             ;
@@ -310,9 +312,9 @@ namespace Antmicro.Renode.Peripherals.SD
             while(true)
             {
                 dmaDescriptor = sysbus.ReadQuadWord(admaSystemAddress.Value);
-                valid = IsBitSet(dmaDescriptor, 1);
-                isEnd = IsBitSet(dmaDescriptor, 2);
-                doInt = IsBitSet(dmaDescriptor, 3);
+                valid = IsBitSet(dmaDescriptor, 0);
+                isEnd = IsBitSet(dmaDescriptor, 1);
+                doInt = IsBitSet(dmaDescriptor, 2);
                 action = (ADMAAction)GetValue(dmaDescriptor, 3, 3);
                 sysAddr = (uint)GetValue(dmaDescriptor, 32, 32);
                 length = (ushort)GetValue(dmaDescriptor, 16, 16);
@@ -364,18 +366,17 @@ namespace Antmicro.Renode.Peripherals.SD
                         return;
                 }
                 
+                if(doInt)
+                {
+                    irqManager.SetInterrupt(Interrupts.DMAInterrupt);
+                }
+
                 if(isEnd)
                 {
                     if(isblockCountEnabled.Value && (totalLength != (ushort)(blockCountField.Value * blockSizeField.Value)))
                         this.Log(LogLevel.Warning, "Sum of ADMA descriptor lengths not equal to Block Count * Block Size! {0} != {1}", totalLength, blockCountField.Value * blockSizeField.Value);
                     
-                    // NOTE: It is optional to assert the DMAInterrupt on the last descriptor before asserting the TransferComplete interrupt.
                     break;
-                }
-                else if(doInt)
-                {
-                    // NOTE this will do int for NOP action. I can't tell what the intended behavior is.
-                    irqManager.SetInterrupt(Interrupts.DMAInterrupt);
                 }
             }
         }
@@ -385,11 +386,11 @@ namespace Antmicro.Renode.Peripherals.SD
             if(isDmaEnabled.Value)
             {
                 DoAdma(sdCard, true);
-                Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
-                {
+                // Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
+                // {
                     this.InfoLog("SD INT Transfer Complete (read)");
                     irqManager.SetInterrupt(Interrupts.TransferComplete);
-                });
+                // });
             }
             else
             {
