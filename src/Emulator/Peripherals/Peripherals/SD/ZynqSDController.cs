@@ -417,11 +417,11 @@ namespace Antmicro.Renode.Peripherals.SD
                 sdCard.WriteData(bytes);
             }
 
-            Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
-            {
+            // Machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
+            // {
                 this.InfoLog("SD INT Transfer Complete (write)");
                 irqManager.SetInterrupt(Interrupts.TransferComplete);
-            });
+            // });
         }
 
         private uint ReadBuffer()
